@@ -1,0 +1,199 @@
+# Borgmatic-UI Development Container (Single Container)
+# Includes: Node.js + Borg 1.x + Borg 2.0 + Borgmatic + Database Tools
+# This matches the production single-container architecture
+# Supports both Borg versions side-by-side via borg1 and borg2 binaries
+
+FROM node:20-alpine
+
+# ============================================================================
+# System dependencies + Borg 1.x & 2.0 + Borgmatic + Database tools
+# ============================================================================
+RUN apk add --no-cache \
+    # Basic tools
+    bash \
+    curl \
+    wget \
+    ca-certificates \
+    tzdata \
+    git \
+    openssh-client \
+    sshpass \
+    github-cli \
+    sudo \
+    docker-cli \
+    bzip2 \
+    unzip \
+    # Runtime libraries for Borg
+    libxxhash \
+    # ICU libraries required by sqlpackage
+    icu-libs \
+    # Python for Borg/Borgmatic
+    python3 \
+    py3-pip \
+    # Build dependencies for Borg 2.0
+    python3-dev \
+    gcc \
+    musl-dev \
+    openssl-dev \
+    acl-dev \
+    lz4-dev \
+    zstd-dev \
+    xxhash-dev \
+    fuse3-dev \
+    linux-headers \
+    pkgconfig \
+    # Database clients for backup dumps
+    mariadb-client \
+    postgresql16-client \
+    mongodb-tools \
+    sqlite \
+    # Cron for scheduled backups
+    dcron \
+    && echo "node ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/node
+
+# ============================================================================
+# MariaDB/MySQL client defaults
+# ============================================================================
+# Some environments ship MariaDB client defaults that require TLS, while many
+# local/dev DB containers do not expose TLS. Borgmatic uses the `mariadb` client
+# (via `--defaults-extra-file`) and will also read global client defaults.
+# We disable SSL for local dev (safe for docker network connections).
+# Note: MariaDB client uses 'skip-ssl', MySQL client uses 'ssl-mode=DISABLED'.
+# The 'loose-' prefix makes unknown options become warnings instead of errors.
+RUN mkdir -p /etc/my.cnf.d \
+    && cat > /etc/my.cnf.d/99-borgmatic-ui-client.cnf <<'EOF'
+# MariaDB client options (skip-ssl)
+[client-mariadb]
+skip-ssl
+
+[mariadb-client]
+skip-ssl
+
+# MySQL client options - use loose- prefix so MariaDB ignores them
+[mysql]
+loose-ssl-mode=DISABLED
+
+# Generic client section - use loose- prefix so unknown options are warnings not errors
+[client]
+loose-skip-ssl
+EOF
+
+# ============================================================================
+# Install Borg 1.x (stable) in its own virtual environment
+# ============================================================================
+RUN python3 -m venv /opt/borg1-venv \
+    && /opt/borg1-venv/bin/pip install --upgrade pip \
+    && /opt/borg1-venv/bin/pip install borgbackup==1.4.0 \
+    && ln -s /opt/borg1-venv/bin/borg /usr/bin/borg1 \
+    && borg1 --version
+
+# ============================================================================
+# Install Borg 2.0 (beta) in its own virtual environment and set as default
+# Includes boto3 for S3 backend support
+# ============================================================================
+RUN python3 -m venv /opt/borg2-venv \
+    && /opt/borg2-venv/bin/pip install --upgrade pip \
+    && /opt/borg2-venv/bin/pip install borgbackup==2.0.0b20 boto3 \
+    && ln -s /opt/borg2-venv/bin/borg /usr/bin/borg2 \
+    && ln -s /opt/borg2-venv/bin/borg /usr/bin/borg \
+    && borg --version \
+    && borg2 --version
+
+# ============================================================================
+# Install latest Borgmatic (supports selecting Borg binary via borgmatic's local_path option)
+# ============================================================================
+RUN pip3 install --break-system-packages --upgrade borgmatic \
+    && borgmatic --version
+
+# ============================================================================
+# Install sqlcmd (Go version - no .NET required) for MSSQL database backups
+# ============================================================================
+RUN SQLCMD_VERSION="1.9.0" && \
+    ARCH=$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/') && \
+    wget -q "https://github.com/microsoft/go-sqlcmd/releases/download/v${SQLCMD_VERSION}/sqlcmd-linux-${ARCH}.tar.bz2" \
+         -O /tmp/sqlcmd.tar.bz2 && \
+    tar -xjf /tmp/sqlcmd.tar.bz2 -C /usr/local/bin && \
+    rm /tmp/sqlcmd.tar.bz2 && \
+    chmod +x /usr/local/bin/sqlcmd && \
+    sqlcmd --version
+
+# ============================================================================
+# Install sqlpackage (client-side MSSQL export tool) for MSSQL database backups
+# Exports databases to .bacpac files locally (unlike sqlcmd BACKUP which writes on server)
+# Uses dotnet tool for cross-platform ARM64/AMD64 support
+# Note: Install to /opt/dotnet-cli so it's accessible by non-root users (container runs as 'node')
+# ============================================================================
+RUN wget -q https://dot.net/v1/dotnet-install.sh -O /tmp/dotnet-install.sh && \
+    chmod +x /tmp/dotnet-install.sh && \
+    /tmp/dotnet-install.sh --channel 8.0 --install-dir /usr/share/dotnet && \
+    ln -s /usr/share/dotnet/dotnet /usr/local/bin/dotnet && \
+    rm /tmp/dotnet-install.sh && \
+    export DOTNET_CLI_HOME=/opt/dotnet-cli && \
+    mkdir -p /opt/dotnet-cli && \
+    dotnet tool install -g microsoft.sqlpackage && \
+    ln -s /opt/dotnet-cli/.dotnet/tools/sqlpackage /usr/local/bin/sqlpackage && \
+    chmod -R a+rx /opt/dotnet-cli && \
+    sqlpackage /version
+
+# Clean up build dependencies to reduce image size
+RUN apk del \
+    python3-dev \
+    gcc \
+    musl-dev \
+    linux-headers \
+    pkgconfig \
+    xxhash-dev \
+    && rm -rf /root/.cache/pip /var/cache/apk/*
+
+# ============================================================================
+# Node.js Application Setup
+# ============================================================================
+WORKDIR /app
+
+# Create node user home directory for npm cache
+RUN mkdir -p /home/node/.npm && chown -R node:node /home/node
+
+# Add node user to docker group (GID 989 matches typical host docker group)
+# This allows the app to run docker commands for database discovery
+RUN addgroup -g 989 docker 2>/dev/null || true; addgroup node docker || true
+
+# Create necessary directories
+RUN mkdir -p /app/data /app/config /app/logs /app/frontend \
+    /app/node_modules /app/frontend/node_modules /workspace \
+    /etc/borgmatic.d /scripts \
+    && chown -R node:node /app /workspace
+
+# Copy database discovery script
+COPY scripts/borgmatic-database-discovery.sh /scripts/
+RUN chmod +x /scripts/borgmatic-database-discovery.sh
+
+# Copy package files for initial install (will be overridden by volume mount)
+COPY nodejs/package.json nodejs/package-lock.json nodejs/nodemon.json ./
+
+# Install backend dependencies
+RUN npm install
+
+# Copy frontend package files
+COPY frontend/package.json frontend/package-lock.json ./frontend/
+
+# Install frontend dependencies
+WORKDIR /app/frontend
+RUN npm install
+
+# Back to app root
+WORKDIR /app
+
+# ============================================================================
+# Expose ports and default command
+# ============================================================================
+EXPOSE 8000 9000 5174
+
+# Labels for identification
+LABEL org.opencontainers.image.title="Borgmatic UI Dev" \
+    org.opencontainers.image.description="Development container with Node.js + Borg 1.x & 2.0 + Borgmatic" \
+    io.borgmatic.borg1.version="1.4.0" \
+    io.borgmatic.borg2.version="2.0.0b20"
+
+# Default command: start both backend and frontend dev servers
+# Can be overridden by Dev Containers or docker-compose
+CMD ["sh", "-c", "npm run dev & cd frontend && npm run dev -- --host 0.0.0.0"]

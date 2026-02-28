@@ -1,0 +1,108 @@
+
+Community License / Private Use License Agreement
+
+(Free, max 3 servers, non-commercial)
+
+Infinity Tools – Community / Private License Agreement
+Smart In Venture GmbH
+Last Updated: 2025-12-25
+
+1. Acceptance of Terms
+
+By downloading, installing, accessing, or using Infinity Tools under a free license (“Free Version”), you (“Licensee”) agree to be bound by this Community / Private License Agreement (“Agreement”).
+If you do not agree, do not install or use the Software.
+
+1.1 Definitions
+
+“Licensor” means Smart In Venture GmbH, Gleueler Str. 245–249, 50935 Köln, Germany.
+“Software” means Infinity Tools and all related software components, scripts, installers, documentation, and accompanying materials.
+“Server” means a physical machine or a virtual machine instance (“VM”), including cloud instances, that runs the Software. Each VM counts as one Server, even if multiple VMs run on the same host.
+“Machine ID” means a unique identifier generated from system parameters to bind the Software installation to a Server.
+“Documentation” means official manuals and product descriptions published by the Licensor.
+“Commercial Use” means any use that directly or indirectly generates revenue or supports professional or organizational activity, including use by companies, public entities, associations, or freelancers in their professional capacity.
+
+2. License Grant (Free, Non-Commercial)
+
+Subject to compliance with this Agreement, the Licensor grants the Licensee a non-exclusive, non-transferable, non-sublicensable, revocable license to install and use the Software solely:
+
+for private, non-commercial purposes, and/or
+
+for evaluation/testing purposes,
+provided that usage remains within the server limit in Section 3.
+
+The Software is licensed, not sold. All rights not expressly granted remain reserved.
+
+3. Server Limit (Max 3 Servers)
+
+3.1
+The Free Version may be installed and used on a maximum of three (3) Servers in total.
+
+3.2
+Each VM or cloud instance counts as one Server, even if multiple instances run on the same physical host.
+
+3.3
+If you require use on more than three (3) Servers, or if you require any Commercial Use, you must purchase a Commercial License.
+
+4. License Binding / Activation (Optional Enforcement)
+
+The Licensor may provide or require an activation mechanism that binds the Free Version installation to a Machine ID.
+You may not circumvent, remove, disable, or interfere with any licensing or activation mechanism.
+
+5. Restrictions
+
+The Licensee shall not:
+
+use the Software for Commercial Use,
+
+resell, rent, lease, sublicense, distribute, or otherwise transfer the Software,
+
+make the Software available to third parties as a hosted service,
+
+reverse engineer, decompile, disassemble, or attempt to derive source code, except as permitted by mandatory law,
+
+remove copyright notices or license enforcement mechanisms,
+
+use the Software unlawfully or in violation of third-party rights.
+
+6. Ownership
+
+The Software and all associated intellectual property rights are and remain the exclusive property of the Licensor.
+
+7. No Warranty
+
+To the maximum extent permitted by law, the Free Version is provided “as is,” without warranty of any kind.
+For Consumers, statutory warranty rights (where applicable) remain unaffected.
+
+8. Limitation of Liability
+
+To the maximum extent permitted by applicable law:
+
+Unlimited liability for intent, gross negligence, and injury to life/body/health.
+
+For slight negligence, liability is limited to breach of essential obligations and to foreseeable typical damage.
+
+For the Free Version, liability for slight negligence is capped at EUR 100 per claim.
+
+Nothing limits liability under mandatory law.
+
+9. Termination
+
+This free license is revocable. The Licensor may terminate this Agreement immediately if the Licensee breaches the terms (e.g., exceeding the 3-server limit or commercial use).
+Upon termination, the Licensee must cease use and delete all copies.
+
+10. Governing Law
+
+This Agreement is governed by the laws of the Federal Republic of Germany, excluding CISG.
+For Consumers, mandatory protections of the law of their habitual residence remain unaffected.
+
+
+Smart In Venture GmbH
+Gleueler Str. 245–249
+50935 Köln, Germany
+Tel.: +49 221 67002150
+Fax: +49 221 67002151
+Email: info@smartinventure.com
+
+Company Website: www.smartinventure.com
+
+Product Website: www.speedbits.io

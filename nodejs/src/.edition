@@ -1,0 +1,12 @@
+{
+  "edition": "community",
+  "features": [
+    "standalone",
+    "client"
+  ],
+  "director_available": false,
+  "upgrade_url": "https://www.speedbits.io",
+  "build_type": "single-image",
+  "prepared_at": "2026-02-28T12:49:33.722Z",
+  "note": "Commercial edition activated at runtime if /app/commercial/director-server.js exists"
+}

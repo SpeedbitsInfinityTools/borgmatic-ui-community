@@ -1,0 +1,239 @@
+# Borgmatic-UI Production Dockerfile
+# Single-Image Architecture: Defaults to Community, Commercial activated at runtime
+#
+# How it works:
+# 1. Build always creates Community edition with stubbed Director files
+# 2. At runtime, start.sh checks for /app/commercial/director-server.js
+# 3. If file exists (injected by Infinity Tools): Commercial edition activated
+# 4. If file missing: Community edition runs with Director features returning 402
+#
+# Includes: Borg 1.x (1.4.0) + Borg 2.x (2.0.0b20) + Borgmatic pre-compiled
+#
+# Usage:
+#   Community (default): Just run the image
+#   Commercial: Mount director-server.js to /app/commercial/
+
+# Stage 1: Build Borg and Borgmatic from source
+# This stage compiles Borg (which requires gcc, python-dev, etc.)
+# We use node:20-alpine as base so the compiled packages are compatible with the final image
+# Supports BOTH Borg 1.x and Borg 2.x side-by-side via borg1 and borg2 binaries
+FROM node:20-alpine AS borg-builder
+
+# Install Python and build dependencies for Borg
+RUN apk add --no-cache \
+    python3 \
+    py3-pip \
+    gcc \
+    musl-dev \
+    python3-dev \
+    openssl-dev \
+    acl-dev \
+    lz4-dev \
+    zstd-dev \
+    xxhash-dev \
+    fuse3-dev \
+    linux-headers \
+    pkgconfig
+
+# Install Borg 1.x in isolated virtual environment
+# Required for Hetzner Storage Boxes and other Borg 1.x-only remotes
+RUN python3 -m venv /opt/borg1-venv \
+    && /opt/borg1-venv/bin/pip install --upgrade pip \
+    && /opt/borg1-venv/bin/pip install borgbackup==1.4.0 \
+    && ln -s /opt/borg1-venv/bin/borg /usr/bin/borg1
+
+# Install Borg 2.x in isolated virtual environment
+# Also install borgmatic here (works with both Borg versions)
+RUN python3 -m venv /opt/borg2-venv \
+    && /opt/borg2-venv/bin/pip install --upgrade pip \
+    && /opt/borg2-venv/bin/pip install borgbackup==2.0.0b20 borgmatic boto3 \
+    && ln -s /opt/borg2-venv/bin/borg /usr/bin/borg2 \
+    && ln -s /opt/borg2-venv/bin/borg /usr/bin/borg \
+    && ln -s /opt/borg2-venv/bin/borgmatic /usr/bin/borgmatic
+
+# Stage 2: Build Frontend
+FROM node:20-alpine AS frontend-builder
+
+# Always build as Community - edition is determined at runtime
+ENV VITE_EDITION=community
+
+WORKDIR /build/frontend
+
+# Copy frontend dependencies
+COPY frontend/package*.json ./
+RUN npm ci --production=false
+
+# Copy frontend source
+COPY frontend/ ./
+
+# Build production bundle
+RUN npm run build:prod
+
+# Stage 3: Build Backend (always creates Community stubs)
+FROM node:20-alpine AS backend-builder
+
+WORKDIR /build
+
+# Copy edition preparation script and backend source
+COPY scripts/ ./scripts/
+COPY nodejs/ ./nodejs/
+
+WORKDIR /build/nodejs
+
+# Install dependencies
+RUN npm ci --production
+
+# Run edition preparation script (always creates Community stubs)
+RUN node ../scripts/prepare-edition.js
+
+# Stage 4: Production Runtime
+FROM node:20-alpine
+
+# Install required system packages (runtime only, no build tools)
+RUN apk add --no-cache \
+    bash \
+    curl \
+    wget \
+    ca-certificates \
+    tzdata \
+    sed \
+    openssh-client \
+    sshpass \
+    bzip2 \
+    unzip \
+    # Docker CLI for database discovery (requires mounted Docker socket)
+    docker-cli \
+    # Python runtime for Borg/Borgmatic
+    python3 \
+    py3-pip \
+    # Runtime libraries needed by compiled Borg
+    acl \
+    lz4-libs \
+    zstd-libs \
+    libxxhash \
+    fuse3 \
+    openssl \
+    # ICU libraries required by sqlpackage
+    icu-libs
+
+# Copy the pre-compiled Borg packages from builder
+# Copy both Borg 1.x and Borg 2.x virtual environments
+COPY --from=borg-builder /opt/borg1-venv /opt/borg1-venv
+COPY --from=borg-builder /opt/borg2-venv /opt/borg2-venv
+
+# Create symlinks to borg binaries (same as in builder stage)
+RUN ln -s /opt/borg1-venv/bin/borg /usr/bin/borg1 && \
+    ln -s /opt/borg2-venv/bin/borg /usr/bin/borg2 && \
+    ln -s /opt/borg2-venv/bin/borg /usr/bin/borg && \
+    ln -s /opt/borg2-venv/bin/borgmatic /usr/bin/borgmatic
+
+# Verify Borg installation (both versions)
+RUN borg1 --version && borg2 --version && borgmatic --version
+
+# Download and install sqlcmd (Go version - no .NET required)
+# Architecture-aware installation for multi-arch builds
+# Note: Skip version check - Go binaries crash under QEMU when cross-compiling
+ARG TARGETARCH
+RUN SQLCMD_VERSION="1.9.0" && \
+    ARCH="${TARGETARCH:-$(uname -m)}" && \
+    [ "$ARCH" = "x86_64" ] && ARCH="amd64" || true && \
+    [ "$ARCH" = "aarch64" ] && ARCH="arm64" || true && \
+    [ "$ARCH" = "amd64" -o "$ARCH" = "arm64" ] || (echo "Unsupported arch for sqlcmd: $ARCH" && exit 1) && \
+    wget -q "https://github.com/microsoft/go-sqlcmd/releases/download/v${SQLCMD_VERSION}/sqlcmd-linux-${ARCH}.tar.bz2" \
+         -O /tmp/sqlcmd.tar.bz2 && \
+    tar -xjf /tmp/sqlcmd.tar.bz2 -C /usr/local/bin && \
+    rm /tmp/sqlcmd.tar.bz2 && \
+    chmod +x /usr/local/bin/sqlcmd && \
+    echo "sqlcmd installed (skipping version check for cross-compile compatibility)"
+
+# Download and install sqlpackage (client-side MSSQL export tool)
+# Required for MSSQL database backups - writes .bacpac files locally
+# Hybrid approach: x64 uses standalone zip (small), ARM64 uses dotnet tool (larger but only option)
+# Note: Install to /opt/sqlpackage so it's accessible by non-root users (container runs as 'node')
+RUN if [ "${TARGETARCH}" = "amd64" ] || [ "$(uname -m)" = "x86_64" ]; then \
+        echo "Installing sqlpackage via standalone zip (x64)..." && \
+        wget -q "https://aka.ms/sqlpackage-linux" -O /tmp/sqlpackage.zip && \
+        unzip -q /tmp/sqlpackage.zip -d /opt/sqlpackage && \
+        chmod +x /opt/sqlpackage/sqlpackage && \
+        ln -s /opt/sqlpackage/sqlpackage /usr/local/bin/sqlpackage && \
+        rm /tmp/sqlpackage.zip; \
+    else \
+        echo "Installing sqlpackage via dotnet tool (ARM64)..." && \
+        wget -q https://dot.net/v1/dotnet-install.sh -O /tmp/dotnet-install.sh && \
+        chmod +x /tmp/dotnet-install.sh && \
+        /tmp/dotnet-install.sh --channel 8.0 --install-dir /usr/share/dotnet && \
+        ln -s /usr/share/dotnet/dotnet /usr/local/bin/dotnet && \
+        rm /tmp/dotnet-install.sh && \
+        export DOTNET_CLI_HOME=/opt/dotnet-cli && \
+        mkdir -p /opt/dotnet-cli && \
+        dotnet tool install -g microsoft.sqlpackage && \
+        ln -s /opt/dotnet-cli/.dotnet/tools/sqlpackage /usr/local/bin/sqlpackage && \
+        chmod -R a+rx /opt/dotnet-cli; \
+    fi && \
+    echo "sqlpackage installed (skipping version check for cross-compile compatibility)"
+
+# Create app directory structure
+WORKDIR /app
+
+# Create necessary directories with final runtime ownership
+RUN install -d -o node -g node \
+    /opt/speedbits/borgmatic-ui-web/data \
+    /opt/speedbits/borgmatic-ui-web/config \
+    /opt/speedbits/borgmatic-ui-web/logs \
+    /app/commercial
+
+# Copy backend dependencies from builder
+COPY --chown=node:node --from=backend-builder /build/nodejs/node_modules ./node_modules
+COPY --chown=node:node --from=backend-builder /build/nodejs/package*.json ./
+
+# Copy backend source (with Community stubs)
+COPY --chown=node:node --from=backend-builder /build/nodejs/src ./src
+
+# Copy edition marker file
+COPY --chown=node:node --from=backend-builder /build/nodejs/src/.edition ./src/.edition
+
+# Copy built frontend from builder
+COPY --chown=node:node --from=frontend-builder /build/frontend/build ./public
+
+# Copy startup script
+COPY --chown=node:node docker/start.sh /app/start.sh
+RUN chmod +x /app/start.sh
+
+# Copy scripts folder (for database discovery, etc.)
+COPY --chown=node:node --from=backend-builder /build/scripts /app/scripts
+RUN chmod +x /app/scripts/*.sh 2>/dev/null || true
+
+# Expose ports
+EXPOSE 8000 9000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:8000/api/health || exit 1
+
+# Version build argument (can be overridden: docker build --build-arg VERSION=1.2.3)
+ARG VERSION=1.0.0
+
+# Set environment (defaults to Community, can be overridden at runtime)
+# CRITICAL: CONFIG_DIR, DATA_DIR, LOGS_DIR must point to container-internal paths
+# These are where volumes are mounted inside the container (not host paths!)
+ENV NODE_ENV=production \
+    PORT=8000 \
+    EDITION=community \
+    CONFIG_DIR=/app/config \
+    DATA_DIR=/app/data \
+    LOGS_DIR=/app/logs
+
+# Add labels
+LABEL io.borgmatic.ui.build="single-image" \
+    io.borgmatic.ui.default_edition="community" \
+    io.borgmatic.ui.version="${VERSION}" \
+    org.opencontainers.image.title="Borgmatic UI" \
+    org.opencontainers.image.description="Borgmatic UI - Single image (Community default, Commercial via injection)" \
+    org.opencontainers.image.vendor="SpeedBits" \
+    org.opencontainers.image.version="${VERSION}"
+
+# Switch to non-root user
+USER node
+
+# Start via startup script (handles edition detection)
+CMD ["/app/start.sh"]

@@ -1,0 +1,93 @@
+# Docker build context ignore file
+# Excludes files/directories from being sent to Docker daemon during build
+
+# ============================================================================
+# CRITICAL: Exclude Commercial Edition Files
+# ============================================================================
+# These files contain Commercial-only features and must NOT be in the Docker image.
+# The Community stub versions are created by scripts/prepare-edition.js during build.
+# The full commercial files are injected at runtime via /app/commercial/ mount.
+#
+# Without this exclusion, Community users would receive Commercial features!
+# ============================================================================
+nodejs/src/services/director-server.js
+nodejs/src/routes/director.js
+
+# Development data (has permission issues, not needed for build anyway)
+dev-data/
+
+# Runtime data and configuration (not needed for build)
+config/
+data/
+logs/
+
+# Deployment and setup scripts (not needed for build)
+deploy/
+
+# Root-level deployment/setup scripts (not needed for build)
+# Note: scripts/ and docker/ directories are needed for build
+start-*.sh
+restart*.sh
+setup-*.sh
+build-*.sh
+pack-*.sh
+test-*.sh
+docker-compose*.sh
+
+# Documentation and resources (not needed in container)
+*.md
+!README.md
+md-files/
+resources/
+*.txt
+LICENSE*
+!LICENSE
+
+# CI/CD configuration (not needed for build)
+azure-pipelines.yml
+.github/
+
+# Docker runtime configs (not needed for build)
+docker-compose*.yml
+docker-compose*.sh
+
+# Node modules (installed fresh in container)
+node_modules/
+nodejs/node_modules/
+frontend/node_modules/
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Build outputs
+dist/
+build/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test files
+coverage/
+.nyc_output/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+

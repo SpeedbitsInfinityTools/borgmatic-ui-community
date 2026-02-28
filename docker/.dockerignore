@@ -1,0 +1,70 @@
+# Development files
+node_modules/
+npm-debug.log
+yarn-error.log
+.pnp
+.pnp.js
+
+# Testing
+coverage/
+.nyc_output/
+*.test.js
+*.spec.js
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Documentation
+*.md
+docs/
+md-files/
+
+# Build artifacts
+dist/
+build/
+*.log
+
+# Data directories (shouldn't be in image)
+data/
+logs/
+config/borgmatic.d/
+
+# IMPORTANT: Allow nodejs source config directory
+!nodejs/src/config/
+
+# Scripts (not needed in container)
+scripts/
+start-dev.sh
+restart.sh
+setup-*.sh
+
+# Docker files (recursive build)
+docker/
+deploy/
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# GitHub
+.github/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+

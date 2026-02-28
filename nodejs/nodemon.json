@@ -1,0 +1,19 @@
+{
+  "watch": ["src"],
+  "ext": "js,mjs,cjs,json",
+  "ignore": [
+    "data/**/*",
+    "config/**/*",
+    "logs/**/*",
+    "node_modules/**/*",
+    "../config/**/*",
+    "/app/config/**/*",
+    "/app/data/**/*",
+    "/app/logs/**/*",
+    "*.test.js",
+    "*.yaml",
+    "*.yml"
+  ],
+  "delay": "500"
+}
+

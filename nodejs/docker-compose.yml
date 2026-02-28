@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  borgmatic-ui:
+    build: .
+    container_name: borgmatic-web-ui-nodejs
+    restart: unless-stopped
+    depends_on:
+      - redis
+    ports:
+      - "7879:8000"
+    volumes:
+      - ./config:/app/config:rw
+      - ${BACKUP_DIR:-./backups}:/app/backups:rw
+      - ./logs:/app/logs:rw
+      - ./data:/app/data:rw
+    environment:
+      - NODE_ENV=production
+      - PORT=8000
+      - BORGMATIC_CONFIG_PATH=/app/config/borgmatic.yaml
+      - BORGMATIC_BACKUP_PATH=/app/backups
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  redis:
+    image: redis:7-alpine
+    container_name: borgmatic-ui-redis
+    restart: unless-stopped
+    command: redis-server --maxmemory 100mb --maxmemory-policy allkeys-lru --save 60 1
+    volumes:
+      - borgmatic_ui_redis_data:/data
+
+volumes:
+  borgmatic_ui_redis_data:
+    name: borgmatic-ui-redis-data

@@ -1,0 +1,32 @@
+{
+  "name": "borgmatic-ui",
+  "version": "1.0.4",
+  "description": "Borgmatic Director UI - Comprehensive web-based user interface for managing Borgmatic backup operations",
+  "private": true,
+  "author": "Smart In Venture GmbH",
+  "license": "Commercial",
+  "keywords": [
+    "borgmatic",
+    "borg",
+    "backup",
+    "web-ui",
+    "director",
+    "borgmatic-ui"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SpeedbitsInfinityTools/borgmatic-ui"
+  },
+  "workspaces": [
+    "nodejs",
+    "frontend"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev --workspace=nodejs\" \"npm run dev --workspace=frontend\"",
+    "build": "npm run build --workspace=frontend",
+    "start": "npm run start --workspace=nodejs"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

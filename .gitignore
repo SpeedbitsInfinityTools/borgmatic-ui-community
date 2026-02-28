@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+frontend/build/
+frontend/dist/
+
+# Runtime data
+config/
+data/
+logs/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store

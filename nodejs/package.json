@@ -1,0 +1,52 @@
+{
+  "name": "speedbits-borgmatic-ui",
+  "version": "1.0.4",
+  "description": "SpeedBits Borgmatic UI - Node.js Backend",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon --config nodemon.json src/server.js",
+    "test": "jest",
+    "build": "echo 'No build step needed for Node.js'",
+    "reset-admin": "node src/utils/reset-admin.js",
+    "reset-admin-custom": "node src/utils/reset-admin.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.932.0",
+    "archiver": "^6.0.1",
+    "async-mutex": "^0.4.0",
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "execa": "^8.0.1",
+    "express": "^4.18.2",
+    "fs-extra": "^11.1.1",
+    "helmet": "^7.0.0",
+    "ioredis": "^5.4.2",
+    "js-yaml": "4.1.1",
+    "jsonwebtoken": "^9.0.2",
+    "morgan": "^1.10.0",
+    "multer": "^2.0.2",
+    "node-cron": "^3.0.2",
+    "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.1",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "nodemon": "^3.0.1"
+  },
+  "overrides": {
+    "glob": "^10.5.0",
+    "jws": "^3.2.3",
+    "inflight": "npm:@esm2cjs/inflight@^1.0.6"
+  },
+  "keywords": [
+    "borgmatic",
+    "backup",
+    "web-ui",
+    "nodejs"
+  ],
+  "author": "Smart In Venture",
+  "license": "Commercial"
+}
