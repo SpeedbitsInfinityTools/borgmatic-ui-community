@@ -90,9 +90,9 @@ The simplest way to get started:
 
 That's it! Infinity Tools handles Docker, SSL certificates, and configuration automatically.
 
-### Option 2: Docker Compose
+### Option 2: Docker Compose (Pre-built Image)
 
-For those who prefer manual Docker setup:
+The easiest way to run with Docker - uses our pre-built image:
 
 ```yaml
 version: '3.8'
@@ -113,20 +113,71 @@ services:
 ```
 
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
 
 Open **TCP port `18460`** on your host/firewall if you access the UI from another machine.
 
 Then visit `http://localhost:18460` to access the UI.
 
-### Option 3: From Source (Development)
+### Option 3: Build Docker Image Yourself
 
-For contributors or those who want to run from source:
+For those who prefer to build from source for full transparency:
 
 ```bash
 # Clone the repository
-git clone https://github.com/smartinventure/borgmatic-ui-community.git
+git clone https://github.com/SpeedbitsInfinityTools/borgmatic-ui-community.git
+cd borgmatic-ui-community
+
+# Build the Docker image locally
+docker build -t borgmatic-ui:local -f docker/Dockerfile .
+
+# Run with your locally built image
+docker run -d \
+  --name borgmatic-ui \
+  -p 18460:8000 \
+  -v $(pwd)/config:/app/config \
+  -v $(pwd)/data:/app/data \
+  -v /:/host:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock:ro \
+  -e NODE_ENV=production \
+  --restart unless-stopped \
+  borgmatic-ui:local
+```
+
+Or use Docker Compose with your local image - create a `docker-compose.yml`:
+
+```yaml
+version: '3.8'
+services:
+  borgmatic-ui:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: borgmatic-ui
+    ports:
+      - "18460:8000"
+    volumes:
+      - ./config:/app/config
+      - ./data:/app/data
+      - /:/host:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - NODE_ENV=production
+    restart: unless-stopped
+```
+
+```bash
+docker compose up -d --build
+```
+
+### Option 4: From Source (Development)
+
+For contributors or those who want to run without Docker:
+
+```bash
+# Clone the repository
+git clone https://github.com/SpeedbitsInfinityTools/borgmatic-ui-community.git
 cd borgmatic-ui-community
 
 # Install dependencies
@@ -140,9 +191,7 @@ cd frontend && npm run build && cd ..
 cd nodejs && npm start
 ```
 
-Visit `http://localhost:18460` to access the UI.
-
-If you need remote access, open **TCP port `18460`** on your firewall.
+Visit `http://localhost:8000` to access the UI.
 
 **Requirements:** Node.js 18+, npm, Borg and Borgmatic installed on the host.
 
