@@ -3,7 +3,7 @@ services:
     image: ghcr.io/speedbitsinfinitytools/borgmatic-ui:latest
     container_name: borgmatic-ui
     ports:
-      - "8000:8000"
+      - "18460:8000"
     volumes:
       - ./config:/app/config
       - ./data:/app/data

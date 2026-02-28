@@ -101,7 +101,7 @@ services:
     image: ghcr.io/speedbitsinfinitytools/borgmatic-ui:latest
     container_name: borgmatic-ui
     ports:
-      - "8000:8000"
+      - "18460:8000"
     volumes:
       - ./config:/app/config
       - ./data:/app/data
@@ -116,7 +116,7 @@ services:
 docker-compose up -d
 ```
 
-Then visit `http://localhost:8000` to access the UI.
+Then visit `http://localhost:18460` to access the UI.
 
 ### Option 3: From Source (Development)
 
@@ -138,7 +138,7 @@ cd frontend && npm run build && cd ..
 cd nodejs && npm start
 ```
 
-Visit `http://localhost:8000` to access the UI.
+Visit `http://localhost:18460` to access the UI.
 
 **Requirements:** Node.js 18+, npm, Borg and Borgmatic installed on the host.
 
