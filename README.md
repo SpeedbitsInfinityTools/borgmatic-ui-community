@@ -116,6 +116,8 @@ services:
 docker-compose up -d
 ```
 
+Open **TCP port `18460`** on your host/firewall if you access the UI from another machine.
+
 Then visit `http://localhost:18460` to access the UI.
 
 ### Option 3: From Source (Development)
@@ -140,6 +142,8 @@ cd nodejs && npm start
 
 Visit `http://localhost:18460` to access the UI.
 
+If you need remote access, open **TCP port `18460`** on your firewall.
+
 **Requirements:** Node.js 18+, npm, Borg and Borgmatic installed on the host.
 
 ### First Steps
@@ -149,6 +153,25 @@ Once running:
 2. Add a repository (Repositories → Add New)
 3. Create a backup job (Backup Jobs → Create New)
 4. Set up notifications (Settings → Notifications)
+
+### Default Login
+
+- **Username:** `admin` (always)
+- **Password:** set by you on first web login (minimum 10 characters; there is no static default like `admin123`)
+
+If no `admin.yaml` exists, the login page shows **Create admin password**.
+After creating it once, sign in with:
+
+- Username: `admin`
+- Your chosen password
+
+Optional non-interactive setup: set `ADMIN_PASSWORD=YourSecurePassword` (minimum 10 characters) in your compose environment before first start.
+
+If you need to reset later:
+
+```bash
+docker exec -it borgmatic-ui node src/utils/reset-admin.js
+```
 
 ---
 

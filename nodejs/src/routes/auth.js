@@ -5,6 +5,69 @@ const { authenticateToken } = require('../middleware/auth');
 const sessionManager = require('../services/session-manager');
 
 /**
+ * Public endpoint: check whether first-time admin setup is required
+ */
+router.get('/setup-status', async (req, res) => {
+    try {
+        const adminUser = await authService.loadAdminUser();
+        res.json({
+            setup_required: !adminUser
+        });
+    } catch (error) {
+        console.error('Setup status error:', error.message);
+        res.status(500).json({
+            detail: 'Internal server error'
+        });
+    }
+});
+
+/**
+ * Public endpoint: create first admin user
+ * Only works when no admin user exists yet.
+ */
+router.post('/setup-admin', async (req, res) => {
+    try {
+        const { password, confirm_password } = req.body || {};
+
+        const existingAdmin = await authService.loadAdminUser();
+        if (existingAdmin) {
+            return res.status(409).json({
+                detail: 'Admin user is already configured'
+            });
+        }
+
+        if (!password || !confirm_password) {
+            return res.status(400).json({
+                detail: 'Password and confirm_password are required'
+            });
+        }
+
+        if (password !== confirm_password) {
+            return res.status(400).json({
+                detail: 'Passwords do not match'
+            });
+        }
+
+        if (String(password).length < 10) {
+            return res.status(400).json({
+                detail: 'Password must be at least 10 characters long'
+            });
+        }
+
+        await authService.createAdminUserWithPassword(password);
+        res.json({
+            success: true,
+            detail: 'Admin user created successfully'
+        });
+    } catch (error) {
+        console.error('Setup admin error:', error.message);
+        res.status(500).json({
+            detail: 'Internal server error'
+        });
+    }
+});
+
+/**
  * Login endpoint
  */
 router.post('/login', async (req, res) => {

@@ -176,6 +176,11 @@ export const authAPI = {
   login: (username: string, password: string) =>
     api.post('/auth/login', { username, password }),
 
+  getSetupStatus: () => api.get('/auth/setup-status'),
+
+  setupAdmin: (password: string, confirm_password: string) =>
+    api.post('/auth/setup-admin', { password, confirm_password }),
+
   logout: () => api.post('/auth/logout'),
 
   refresh: () => api.post('/auth/refresh'),

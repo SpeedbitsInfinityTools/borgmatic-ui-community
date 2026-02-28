@@ -122,45 +122,57 @@ class AuthService {
                 return;
             }
 
-            // Generate secure random password
-            const crypto = require('crypto');
-            const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*';
-            const defaultPassword = Array.from({ length: 20 }, () =>
-                alphabet[crypto.randomInt(0, alphabet.length)]
-            ).join('');
-
-            const hashedPassword = await this.hashPassword(defaultPassword);
-
-            const adminUser = {
-                username: 'admin',
-                password_hash: hashedPassword,
-                email: 'admin@borgmatic.local',
-                is_active: true,
-                is_admin: true,
-                created_at: new Date().toISOString(),
-                last_login: null
-            };
-
-            const saved = await this.saveAdminUser(adminUser);
-            if (saved) {
-                console.log('\n' + '='.repeat(60));
-                console.log('🔐 SECURELY GENERATED ADMIN PASSWORD');
-                console.log('='.repeat(60));
-                console.log(`Username: admin`);
-                console.log(`Password: ${defaultPassword}`);
-                console.log('='.repeat(60));
-                console.log('⚠️  STORE THIS SECURELY - WILL NOT BE SHOWN AGAIN!');
-                console.log('='.repeat(60));
-                console.log('');
-
-                // Interactive prompt to ensure user saves the password
-                await this.waitForUserConfirmation();
-
-                console.log('Admin user created successfully!');
+        // If ADMIN_PASSWORD is provided by environment, create admin automatically.
+        // Otherwise, require web-based first-time setup to avoid log scraping.
+        const envPassword = process.env.ADMIN_PASSWORD;
+        if (envPassword && String(envPassword).trim().length >= 10) {
+                await this.createAdminUserWithPassword(String(envPassword).trim());
+                console.log('✅ Admin user created from ADMIN_PASSWORD environment variable');
+                return;
             }
+
+            console.log('\n' + '='.repeat(60));
+            console.log('🔧 FIRST-TIME SETUP REQUIRED');
+            console.log('='.repeat(60));
+            console.log('No admin user found at startup.');
+            console.log('Open the web UI to create the admin password.');
+            console.log('Alternatively set ADMIN_PASSWORD env var before startup.');
+            console.log('='.repeat(60));
+            console.log('');
         } catch (error) {
             console.error('Failed to create first user:', error.message);
         }
+    }
+
+    /**
+     * Create admin user with an explicit password (first-time setup flow)
+     */
+    async createAdminUserWithPassword(password, email = 'admin@borgmatic.local') {
+        if (!password || String(password).length < 10) {
+            throw new Error('Password must be at least 10 characters long');
+        }
+
+        const existingAdmin = await this.loadAdminUser();
+        if (existingAdmin) {
+            throw new Error('Admin user already exists');
+        }
+
+        const hashedPassword = await this.hashPassword(password);
+        const adminUser = {
+            username: 'admin',
+            password_hash: hashedPassword,
+            email,
+            is_active: true,
+            is_admin: true,
+            created_at: new Date().toISOString(),
+            last_login: null
+        };
+
+        const saved = await this.saveAdminUser(adminUser);
+        if (!saved) {
+            throw new Error('Failed to save admin user');
+        }
+        return adminUser;
     }
 
     /**
