@@ -50,10 +50,75 @@ function getServices() {
 // Import built-in templates
 const infinityToolsTemplate = require('./infinity-tools-template');
 
+/**
+ * Discover Infinity Tools installation paths from /etc/infinitytools.conf
+ * This file is created by the Infinity Tools installer and contains:
+ *   INSTALL_DIR="/opt/infinitytools"
+ *   DATA_ROOT="/opt/speedbits"
+ * 
+ * @returns {Object} Discovered paths or defaults
+ */
+async function discoverInfinityToolsPaths() {
+    const defaults = {
+        installDir: '/opt/infinitytools',
+        dataRoot: '/opt/speedbits',
+        discovered: false,
+        configExists: false
+    };
+
+    try {
+        // In Docker container, host filesystem is at /host
+        const configPaths = [
+            '/host/etc/infinitytools.conf',  // Docker container (host mounted at /host)
+            '/etc/infinitytools.conf'         // Direct access (dev or non-Docker)
+        ];
+
+        for (const configPath of configPaths) {
+            if (await fs.pathExists(configPath)) {
+                const content = await fs.readFile(configPath, 'utf8');
+                const result = { ...defaults, configExists: true };
+
+                // Parse shell-style config file
+                const lines = content.split('\n');
+                for (const line of lines) {
+                    const trimmed = line.trim();
+                    if (trimmed.startsWith('#') || !trimmed.includes('=')) continue;
+
+                    const [key, ...valueParts] = trimmed.split('=');
+                    const value = valueParts.join('=').replace(/^["']|["']$/g, '').trim();
+
+                    if (key.trim() === 'INSTALL_DIR') {
+                        result.installDir = value;
+                    } else if (key.trim() === 'DATA_ROOT') {
+                        result.dataRoot = value;
+                    }
+                }
+
+                result.discovered = true;
+                console.log(`✅ Discovered Infinity Tools paths from ${configPath}:`, result);
+                return result;
+            }
+        }
+
+        console.log('ℹ️ No infinitytools.conf found, using defaults');
+        return defaults;
+    } catch (error) {
+        console.warn('⚠️ Error reading infinitytools.conf:', error.message);
+        return defaults;
+    }
+}
+
 class TemplateManager {
     constructor() {
         this.builtInTemplates = new Map();
         this.builtInTemplates.set('infinity-tools', infinityToolsTemplate);
+    }
+
+    /**
+     * Get discovered Infinity Tools paths
+     */
+    async getInfinityToolsPaths() {
+        return discoverInfinityToolsPaths();
     }
 
     /**
@@ -111,6 +176,7 @@ class TemplateManager {
      * @param {string} options.repository_path - Path for new repository (if creating)
      * @param {string} options.repository_id - ID of existing repository (if selecting)
      * @param {string} options.log_file_path - Path for log file (optional)
+     * @param {string} options.backup_source_path - Custom backup source path (optional, defaults to discovered or /host/opt/speedbits)
      */
     async activateInfinityToolsTemplate(options = {}) {
         // Get lazy-loaded services
@@ -306,11 +372,22 @@ class TemplateManager {
             const logManager = require('../log-manager');
             const logFilePath = options.log_file_path || logManager.getBorgmaticLogPath();
 
+            // Determine backup source path - use provided path, or auto-discover, or default
+            let backupSourcePath = options.backup_source_path ? String(options.backup_source_path).trim() : '';
+            if (!backupSourcePath) {
+                const discoveredPaths = await discoverInfinityToolsPaths();
+                // In Docker, we need to prefix with /host since host filesystem is mounted there
+                backupSourcePath = `/host${discoveredPaths.dataRoot}`;
+            }
+            result.steps.push(`✅ Backup source path: ${backupSourcePath}`);
+            result.created.backup_source_path = backupSourcePath;
+
             const filesBackupData = {
                 name: template.filesBackup.name,
                 description: template.filesBackup.description,
                 // BackupManager expects sources as objects ({type:'local', path})
-                sources: (template.filesBackup.sources || []).map(p => ({ type: 'local', path: p })),
+                // Use custom backup source path instead of template default
+                sources: [{ type: 'local', path: backupSourcePath }],
                 repositories: [{ path: repositoryPath, label: 'Infinity Tools Repo' }],
                 // Never include passphrase in backup payloads for existing repos.
                 ...(passphrase ? { repository_passphrase: passphrase } : {}),

@@ -3,9 +3,29 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const path = require('path');
+const fs = require('fs');
 const authService = require('./services/auth');
 const config = require('./config');
 const { initRedis } = require('./services/redis-client');
+
+// Get app version from package.json
+const getAppVersion = () => {
+    try {
+        // Try root package.json first (monorepo source of truth)
+        const rootPkgPath = path.join(__dirname, '..', '..', 'package.json');
+        if (fs.existsSync(rootPkgPath)) {
+            return require(rootPkgPath).version || '1.0.0';
+        }
+        // Fallback to nodejs package.json
+        const nodejsPkgPath = path.join(__dirname, '..', 'package.json');
+        if (fs.existsSync(nodejsPkgPath)) {
+            return require(nodejsPkgPath).version || '1.0.0';
+        }
+    } catch (e) {
+        console.error('Failed to read app version:', e.message);
+    }
+    return '1.0.0';
+};
 
 const app = express();
 const PORT = config.port;
@@ -174,7 +194,7 @@ app.get('/api/health', (req, res) => {
     res.json({
         status: 'healthy',
         timestamp: new Date().toISOString(),
-        version: '1.0.0',
+        version: getAppVersion(),
         backend: 'nodejs'
     });
 });
@@ -281,6 +301,14 @@ async function startServer() {
         }
     } catch (error) {
         console.warn('⚠️ Template manager initialization warning:', error.message);
+    }
+
+    // Initialize schedule manager (restores cron jobs for active backups)
+    try {
+        const scheduleManager = require('./services/schedule-manager');
+        await scheduleManager.initialize();
+    } catch (error) {
+        console.error('❌ Failed to initialize schedule manager:', error.message);
     }
 
     // Initialize database discovery service
@@ -877,8 +905,6 @@ process.on('SIGTERM', () => {
     eventManager.cleanup();
     process.exit(0);
 });
-
-const fs = require('fs');
 
 // Error logging configuration and state
 const ERROR_LOG_CONFIG = {

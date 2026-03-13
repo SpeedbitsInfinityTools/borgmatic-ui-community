@@ -58,17 +58,28 @@ async function requireDirectorMode(req, res, next) {
 /**
  * GET /api/templates/infinity-tools/status
  * Check if Infinity Tools template is activated
+ * Also returns auto-discovered paths from /etc/infinitytools.conf
  */
 router.get('/infinity-tools/status', authenticateToken, async (req, res) => {
     try {
         const isActivated = infinityToolsActivator.isTemplateActivated('infinity-tools');
         const template = infinityToolsActivator.getTemplate('infinity-tools');
+        
+        // Get auto-discovered paths from Infinity Tools config
+        const discoveredPaths = await infinityToolsActivator.getInfinityToolsPaths();
+        
+        // Build the suggested backup source path (with /host prefix for Docker)
+        const suggestedBackupSource = `/host${discoveredPaths.dataRoot}`;
 
         res.json({
             success: true,
             data: {
                 activated: isActivated,
-                template: template
+                template: template,
+                discovered_paths: {
+                    ...discoveredPaths,
+                    suggested_backup_source: suggestedBackupSource
+                }
             }
         });
     } catch (error) {
@@ -87,12 +98,35 @@ router.get('/infinity-tools/status', authenticateToken, async (req, res) => {
  */
 router.post('/infinity-tools/activate', authenticateToken, requireAdmin, async (req, res) => {
     console.log('📥 /infinity-tools/activate endpoint hit');
-    console.log('📥 Request body:', JSON.stringify(req.body, null, 2));
+    const redactedBody = { ...(req.body || {}) };
+    if (redactedBody.passphrase) {
+        redactedBody.passphrase = '[REDACTED]';
+    }
+    console.log('📥 Request body:', JSON.stringify(redactedBody, null, 2));
     try {
-        const { passphrase, repository_option, repository_path, repository_id, log_file_path, borg_version } = req.body;
+        const { passphrase, repository_option, repository_path, repository_id, log_file_path, borg_version, backup_source_path } = req.body;
         const fs = require('fs-extra');
         const path = require('path');
         console.log('📥 Parsed request successfully');
+
+        // Validate backup source path when provided
+        if (backup_source_path !== undefined) {
+            const normalizedBackupSourcePath = String(backup_source_path).trim();
+            if (!normalizedBackupSourcePath) {
+                return res.status(400).json({
+                    success: false,
+                    detail: 'Backup source path cannot be empty.',
+                    error_code: 'INVALID_BACKUP_SOURCE_PATH'
+                });
+            }
+            if (!normalizedBackupSourcePath.startsWith('/')) {
+                return res.status(400).json({
+                    success: false,
+                    detail: 'Backup source path must be an absolute path.',
+                    error_code: 'INVALID_BACKUP_SOURCE_PATH'
+                });
+            }
+        }
 
         // Pre-validation for "create new repository" option
         if (repository_option === 'create' && repository_path) {
@@ -176,6 +210,7 @@ router.post('/infinity-tools/activate', authenticateToken, requireAdmin, async (
             repository_id,
             log_file_path,
             borg_version,
+            backup_source_path,
             hasPassphrase: !!passphrase
         });
 
@@ -187,7 +222,8 @@ router.post('/infinity-tools/activate', authenticateToken, requireAdmin, async (
                 repository_path: repository_path,
                 repository_id: repository_id,
                 log_file_path: log_file_path,
-                borg_version: borg_version || '1.x'
+                borg_version: borg_version || '1.x',
+                backup_source_path: backup_source_path ? String(backup_source_path).trim() : undefined
             });
         } catch (activationError) {
             console.error('❌ Template activation threw error:', activationError);

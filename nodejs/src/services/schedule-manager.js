@@ -17,6 +17,70 @@ class ScheduleManager {
     }
 
     /**
+     * Initialize schedule manager on startup
+     * Restores cron jobs for all active backups
+     */
+    async initialize() {
+        console.log('🕒 Initializing schedule manager...');
+        try {
+            // Ensure schedules file exists with defaults
+            await this.getAllSchedules();
+            
+            // Restore cron jobs for all active backups
+            await this.restoreActiveBackupJobs();
+            
+            console.log('✅ Schedule manager initialized');
+        } catch (error) {
+            console.error('❌ Failed to initialize schedule manager:', error.message);
+        }
+    }
+
+    /**
+     * Restore cron jobs for all active backups on startup
+     * This ensures scheduled backups continue running after container restart
+     */
+    async restoreActiveBackupJobs() {
+        // Lazy-load to avoid circular dependency
+        const backupManager = require('./backup-manager');
+        
+        const backups = await backupManager.getAllBackups();
+        const schedules = await this.getAllSchedules();
+        
+        let restoredCount = 0;
+        
+        for (const backup of backups) {
+            if (backup.is_active && backup.schedule_id) {
+                const schedule = schedules.find(s => s.id === backup.schedule_id);
+                if (schedule) {
+                    if (!cron.validate(schedule.cron_expression)) {
+                        console.warn(`⚠️  Invalid cron expression "${schedule.cron_expression}" for schedule ${schedule.id}`);
+                        continue;
+                    }
+                    try {
+                        this.startCronJob(
+                            backup.schedule_id,
+                            backup.id,
+                            backup.filename,
+                            schedule.cron_expression
+                        );
+                        restoredCount++;
+                    } catch (error) {
+                        console.warn(`⚠️  Failed to restore cron job for backup ${backup.name || backup.id}: ${error.message}`);
+                    }
+                } else {
+                    console.warn(`⚠️  Schedule ${backup.schedule_id} not found for backup ${backup.name || backup.id}`);
+                }
+            }
+        }
+        
+        if (restoredCount > 0) {
+            console.log(`🕒 Restored ${restoredCount} scheduled backup job(s)`);
+        } else {
+            console.log('🕒 No active scheduled backups to restore');
+        }
+    }
+
+    /**
      * Get all saved schedules
      */
     async getAllSchedules() {
@@ -180,8 +244,13 @@ class ScheduleManager {
                 yaml.dump(data, { indent: 2 })
             );
 
-            // Stop cron job if running
-            this.stopCronJob(scheduleId);
+            // Stop all cron jobs tied to this schedule
+            const prefix = `${scheduleId}-`;
+            for (const jobKey of this.cronJobs.keys()) {
+                if (jobKey === scheduleId || jobKey.startsWith(prefix)) {
+                    this.stopCronJob(jobKey);
+                }
+            }
 
             console.log(`✓ Deleted schedule: ${scheduleId}`);
             return true;

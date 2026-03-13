@@ -204,6 +204,7 @@ export const dashboardAPI = {
     }),
   getToolsHealth: () => api.get('/dashboard/tools-health'),
   getVaultHealth: () => api.get('/dashboard/vault-health'),
+  getHealth: () => api.get('/health'),
   resetVault: () => api.post('/dashboard/vault-reset', { confirm: 'RESET_VAULT' }),
   downloadConfigZip: () => api.get('/dashboard/download-config-zip', { responseType: 'blob' }),
   importConfigZip: (file: File) => {

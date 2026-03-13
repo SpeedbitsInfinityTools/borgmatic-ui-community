@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth.tsx'
 import { useMutation, useQuery, useQueryClient } from 'react-query'
-import { authAPI, identityAPI, logsAPI } from '../services/api'
+import { authAPI, identityAPI, logsAPI, dashboardAPI } from '../services/api'
 import { toast } from 'react-hot-toast'
 import { useDirector } from '../contexts/DirectorContext'
 import { useSSEContext } from '../contexts/SSEContext'
@@ -77,6 +77,17 @@ export default function Layout({ children }: { children: React.ReactNode }) {
       staleTime: 10000,       // Consider data fresh for 10 seconds
     }
   )
+
+  // Fetch app version from health endpoint
+  const { data: healthData } = useQuery(
+    'appHealth',
+    () => dashboardAPI.getHealth(),
+    {
+      staleTime: 60000, // Version doesn't change often
+      retry: false,
+    }
+  )
+  const appVersion = healthData?.data?.version || ''
 
   // Refresh key data when user navigates to a new page
   // This ensures the user always sees fresh data immediately on navigation
@@ -528,10 +539,13 @@ export default function Layout({ children }: { children: React.ReactNode }) {
         {/* Footer */}
         <footer className="bg-white border-t border-gray-200 mt-auto">
           <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-4">
-            <div className="text-center">
-              <p className="text-base text-gray-500">
+            <div className="flex items-center justify-between">
+              <p className="text-sm text-gray-500">
                 © <a href="https://speedbits.io" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline">Speedbits</a> / Smart In Venture 2025. Borgmatic Director UI is included in the <a href="https://speedbits.io/infinity-tools/" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline">Infinity Tools</a> Commercial
               </p>
+              {appVersion && (
+                <span className="text-xs text-gray-400">v{appVersion}</span>
+              )}
             </div>
           </div>
         </footer>

@@ -101,6 +101,8 @@ RUN apk add --no-cache \
     sshpass \
     bzip2 \
     unzip \
+    # su-exec for dropping privileges in entrypoint (Alpine's gosu)
+    su-exec \
     # Docker CLI for database discovery (requires mounted Docker socket)
     docker-cli \
     # Python runtime for Borg/Borgmatic
@@ -199,6 +201,10 @@ COPY --chown=node:node --from=frontend-builder /build/frontend/build ./public
 COPY --chown=node:node docker/start.sh /app/start.sh
 RUN chmod +x /app/start.sh
 
+# Copy entrypoint script (runs as root to fix permissions, then drops to node)
+COPY docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
 # Copy scripts folder (for database discovery, etc.)
 COPY --chown=node:node --from=backend-builder /build/scripts /app/scripts
 RUN chmod +x /app/scripts/*.sh 2>/dev/null || true
@@ -232,8 +238,7 @@ LABEL io.borgmatic.ui.build="single-image" \
     org.opencontainers.image.vendor="SpeedBits" \
     org.opencontainers.image.version="${VERSION}"
 
-# Switch to non-root user
-USER node
-
-# Start via startup script (handles edition detection)
+# Container starts as root, entrypoint fixes permissions then drops to 'node' user
+# This ensures bind-mounted volumes have correct ownership even if host creates them as root
+ENTRYPOINT ["/entrypoint.sh"]
 CMD ["/app/start.sh"]

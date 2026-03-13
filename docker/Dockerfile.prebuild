@@ -19,6 +19,9 @@
 # Supports BOTH Borg 1.x and Borg 2.x side-by-side via borg1 and borg2 binaries
 FROM node:20-alpine AS borg-builder
 
+# Use HTTP mirrors to avoid SSL certificate issues in corporate/WSL2 environments
+RUN sed -i 's/https:/http:/g' /etc/apk/repositories
+
 # Install Python and build dependencies for Borg
 RUN apk add --no-cache \
     python3 \
@@ -37,22 +40,26 @@ RUN apk add --no-cache \
 
 # Install Borg 1.x in isolated virtual environment
 # Required for Hetzner Storage Boxes and other Borg 1.x-only remotes
+# --trusted-host bypasses SSL verification for corporate/WSL2 environments
 RUN python3 -m venv /opt/borg1-venv \
-    && /opt/borg1-venv/bin/pip install --upgrade pip \
-    && /opt/borg1-venv/bin/pip install borgbackup==1.4.0 \
+    && /opt/borg1-venv/bin/pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org --upgrade pip \
+    && /opt/borg1-venv/bin/pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org borgbackup==1.4.0 \
     && ln -s /opt/borg1-venv/bin/borg /usr/bin/borg1
 
 # Install Borg 2.x in isolated virtual environment
 # Also install borgmatic here (works with both Borg versions)
 RUN python3 -m venv /opt/borg2-venv \
-    && /opt/borg2-venv/bin/pip install --upgrade pip \
-    && /opt/borg2-venv/bin/pip install borgbackup==2.0.0b20 borgmatic boto3 \
+    && /opt/borg2-venv/bin/pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org --upgrade pip \
+    && /opt/borg2-venv/bin/pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org borgbackup==2.0.0b20 borgmatic boto3 \
     && ln -s /opt/borg2-venv/bin/borg /usr/bin/borg2 \
     && ln -s /opt/borg2-venv/bin/borg /usr/bin/borg \
     && ln -s /opt/borg2-venv/bin/borgmatic /usr/bin/borgmatic
 
 # Stage 2: Build Backend (always creates Community stubs)
 FROM node:20-alpine AS backend-builder
+
+# Use HTTP mirrors to avoid SSL certificate issues in corporate/WSL2 environments
+RUN sed -i 's/https:/http:/g' /etc/apk/repositories
 
 WORKDIR /build
 
@@ -62,14 +69,17 @@ COPY nodejs/ ./nodejs/
 
 WORKDIR /build/nodejs
 
-# Install dependencies
-RUN npm ci --production
+# Install dependencies (strict-ssl=false for corporate/WSL2 environments)
+RUN npm config set strict-ssl false && npm ci --production
 
 # Run edition preparation script (always creates Community stubs)
 RUN node ../scripts/prepare-edition.js
 
 # Stage 3: Production Runtime
 FROM node:20-alpine
+
+# Use HTTP mirrors to avoid SSL certificate issues in corporate/WSL2 environments
+RUN sed -i 's/https:/http:/g' /etc/apk/repositories
 
 # Install required system packages (runtime only, no build tools)
 RUN apk add --no-cache \
@@ -83,6 +93,8 @@ RUN apk add --no-cache \
     sshpass \
     bzip2 \
     unzip \
+    # su-exec for dropping privileges in entrypoint (Alpine's gosu)
+    su-exec \
     # Docker CLI for database discovery (requires mounted Docker socket)
     docker-cli \
     # Python runtime for Borg/Borgmatic
@@ -182,6 +194,10 @@ COPY --chown=node:node frontend/build ./public
 COPY --chown=node:node docker/start.sh /app/start.sh
 RUN chmod +x /app/start.sh
 
+# Copy entrypoint script (runs as root to fix permissions, then drops to node)
+COPY docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
 # Copy scripts folder (for database discovery, etc.)
 COPY --chown=node:node --from=backend-builder /build/scripts /app/scripts
 RUN chmod +x /app/scripts/*.sh 2>/dev/null || true
@@ -215,8 +231,7 @@ LABEL io.borgmatic.ui.build="single-image-prebuild" \
     org.opencontainers.image.vendor="SpeedBits" \
     org.opencontainers.image.version="${VERSION}"
 
-# Switch to non-root user
-USER node
-
-# Start via startup script (handles edition detection)
+# Container starts as root, entrypoint fixes permissions then drops to 'node' user
+# This ensures bind-mounted volumes have correct ownership even if host creates them as root
+ENTRYPOINT ["/entrypoint.sh"]
 CMD ["/app/start.sh"]

@@ -47,6 +47,8 @@ export default function Templates() {
   const [confirmPassphrase, setConfirmPassphrase] = useState('')
   const [showPassphrase, setShowPassphrase] = useState(false)
   const [passphraseError, setPassphraseError] = useState<string | null>(null)
+  // Backup source path (data path for Infinity Tools)
+  const [backupSourcePath, setBackupSourcePath] = useState('/host/opt/speedbits')
 
   // Fetch log settings to get the suggested log path
   const { data: logSettingsData } = useQuery({
@@ -81,6 +83,9 @@ export default function Templates() {
   const isInfinityToolsActivated = infinityToolsStatus?.activated || false
   // Use template from status or find it from templates list as fallback
   const infinityToolsTemplate = infinityToolsStatus?.template || templates.find((t: Template) => t.id === 'infinity-tools')
+  // Get discovered paths for auto-populating the backup source
+  const discoveredPaths = infinityToolsStatus?.discovered_paths
+  const suggestedBackupSource = discoveredPaths?.suggested_backup_source || '/host/opt/speedbits'
 
   // Fetch existing repositories for selection
   const { data: repositoriesData } = useQuery({
@@ -108,6 +113,14 @@ export default function Templates() {
     setShowPassphrase(false)
     setPassphraseError(null)
     resetRepoTest()
+    // Reset backup source path to suggested value
+    setBackupSourcePath(suggestedBackupSource)
+  }
+
+  const openActivationModal = () => {
+    // Initialize backup source path with discovered/suggested value
+    setBackupSourcePath(suggestedBackupSource)
+    setShowActivationModal(true)
   }
 
   // Delete mutation
@@ -165,14 +178,15 @@ export default function Templates() {
 
   // Infinity Tools activation mutation
   const activateInfinityToolsMutation = useMutation({
-    mutationFn: (options: { repoOption: 'create' | 'select', repoPath?: string, repoId?: string, logPath?: string, borgVersion?: string, passphrase?: string }) =>
+    mutationFn: (options: { repoOption: 'create' | 'select', repoPath?: string, repoId?: string, logPath?: string, borgVersion?: string, passphrase?: string, backupSourcePath?: string }) =>
       templatesAPI.activateInfinityTools({
         passphrase: options.passphrase || 'AUTO_GENERATE',
         repository_option: options.repoOption,
         repository_path: options.repoPath,
         repository_id: options.repoId,
         log_file_path: options.logPath,
-        borg_version: options.borgVersion
+        borg_version: options.borgVersion,
+        backup_source_path: options.backupSourcePath
       }),
     onSuccess: (response) => {
       const passphrase = response.data?.data?.passphrase
@@ -259,7 +273,8 @@ export default function Templates() {
       repoId: repoOption === 'select' ? selectedRepoId : undefined,
       logPath: normalizedLogPath,
       borgVersion: repoOption === 'create' ? borgVersion : undefined,
-      passphrase: repoOption === 'create' ? passphrase : undefined
+      passphrase: repoOption === 'create' ? passphrase : undefined,
+      backupSourcePath: backupSourcePath
     })
   }
 
@@ -510,7 +525,7 @@ export default function Templates() {
               )}
             </h3>
             <p className="mt-1 text-sm text-gray-600">
-              One-click backup solution for Infinity Tools installations. Automatically backs up all applications and databases in <code className="text-xs bg-white px-1 py-0.5 rounded">/opt/speedbits</code>.
+              One-click backup solution for Infinity Tools installations. The data path is auto-detected and can be changed during activation.
             </p>
 
             <div className="mt-3 flex flex-wrap gap-2 text-xs text-gray-600">
@@ -532,7 +547,7 @@ export default function Templates() {
               {!isInfinityToolsActivated ? (
                 <>
                   <button
-                    onClick={() => setShowActivationModal(true)}
+                    onClick={openActivationModal}
                     disabled={activateInfinityToolsMutation.isLoading}
                     className="btn-primary text-sm"
                   >
@@ -580,7 +595,7 @@ export default function Templates() {
                   <div>
                     <span className="font-medium text-gray-700">Files Backup:</span>
                     <ul className="mt-1 text-gray-600 list-disc list-inside">
-                      <li>Sources: {infinityToolsTemplate.filesBackup?.sources?.join(', ') || '/opt/speedbits'}</li>
+                      <li>Sources: {infinityToolsTemplate.filesBackup?.sources?.join(', ') || suggestedBackupSource}</li>
                       <li>Schedule: {infinityToolsTemplate.filesBackup?.schedule?.cron || '0 2 * * *'} ({infinityToolsTemplate.metadata?.backup_frequency?.files || 'Daily at 2 AM'})</li>
                       <li>Retention: {infinityToolsTemplate.filesBackup?.retention?.keep_daily || 7} daily, {infinityToolsTemplate.filesBackup?.retention?.keep_weekly || 4} weekly, {infinityToolsTemplate.filesBackup?.retention?.keep_monthly || 6} monthly</li>
                     </ul>
@@ -830,6 +845,29 @@ export default function Templates() {
 
             {/* Body - scrollable */}
             <div className="px-6 py-4 space-y-4 overflow-y-auto flex-1">
+              {/* Backup Source Path (Data Path) */}
+              <div className="space-y-2">
+                <PathSelectorField
+                  label="Infinity Tools Data Path"
+                  value={backupSourcePath}
+                  onChange={setBackupSourcePath}
+                  placeholder="/host/opt/speedbits"
+                  helperText="Path to your Infinity Tools data directory. This is where your applications and configurations are stored."
+                  selectMode="directories"
+                  inputClassName="text-sm"
+                />
+                {discoveredPaths?.discovered && (
+                  <p className="text-xs text-green-600">
+                    ✅ Auto-discovered from <code className="bg-green-50 px-1 rounded">/etc/infinitytools.conf</code>
+                  </p>
+                )}
+                {discoveredPaths && !discoveredPaths.discovered && (
+                  <p className="text-xs text-amber-600">
+                    ⚠️ Using default path (no infinitytools.conf found)
+                  </p>
+                )}
+              </div>
+
               {/* Repository Option Selection */}
               <div className="space-y-3">
                 <label className="block text-sm font-medium text-gray-700">Repository Option</label>
