@@ -7,6 +7,6 @@
   "director_available": false,
   "upgrade_url": "https://www.speedbits.io",
   "build_type": "single-image",
-  "prepared_at": "2026-03-13T14:21:45.004Z",
+  "prepared_at": "2026-03-13T14:25:08.974Z",
   "note": "Commercial edition activated at runtime if /app/commercial/director-server.js exists"
 }
