@@ -51,9 +51,10 @@ class BackupExecutor {
             throw new Error('Backup is already running. Please wait for it to complete.');
         }
 
+        let backup = null;
         try {
             // Get backup configuration
-            const backup = await backupManager.getBackup(backupId);
+            backup = await backupManager.getBackup(backupId);
             const configPath = path.join(
                 config.configDir,
                 'borgmatic.d',
@@ -214,21 +215,31 @@ class BackupExecutor {
                 const yamlText = await fs.readFile(configPath, 'utf8');
                 const matches = Array.from(yamlText.matchAll(/\$\{(BORGMATIC_UI_DB_PASS_[A-Za-z0-9_]+)\}/g)).map(m => m[1]);
                 const uniqueEnvVars = Array.from(new Set(matches));
+                
                 if (uniqueEnvVars.length > 0) {
                     const passwordManager = require('./password-manager');
+                    let loadedCount = 0;
+                    
                     for (const varName of uniqueEnvVars) {
                         try {
                             const creds = await passwordManager.getDatabaseCredentials(varName);
-                            const pw = creds?.credentials?.password;
-                            if (pw) {
-                                env[varName] = pw;
+                            
+                            if (creds) {
+                                const pw = creds?.credentials?.password;
+                                if (pw) {
+                                    env[varName] = pw;
+                                    loadedCount++;
+                                } else {
+                                    console.warn(`⚠️  DB credentials found but no password property for ${varName}. Keys: ${Object.keys(creds?.credentials || {}).join(', ')}`);
+                                }
                             } else {
-                                console.warn(`⚠️  Missing DB password in vault for ${varName}`);
+                                console.warn(`⚠️  No DB credentials found in vault for ${varName}`);
                             }
                         } catch (e) {
                             console.warn(`⚠️  Could not load DB password for ${varName}:`, e.message);
                         }
                     }
+                    console.log(`🔐 Loaded ${loadedCount}/${uniqueEnvVars.length} DB password entries from vault`);
                 }
             } catch (e) {
                 console.warn('⚠️  Could not scan config for DB password placeholders:', e.message);
