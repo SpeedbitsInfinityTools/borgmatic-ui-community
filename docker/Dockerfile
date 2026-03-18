@@ -116,7 +116,10 @@ RUN apk add --no-cache \
     fuse3 \
     openssl \
     # ICU libraries required by sqlpackage
-    icu-libs
+    icu-libs \
+    # Database clients for borgmatic database hooks
+    mariadb-client \
+    postgresql-client
 
 # Copy the pre-compiled Borg packages from builder
 # Copy both Borg 1.x and Borg 2.x virtual environments

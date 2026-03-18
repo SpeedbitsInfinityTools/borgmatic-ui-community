@@ -18,8 +18,11 @@ import {
   XCircle,
   X,
   Loader2,
+  Lock,
+  Unlock,
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
+import { useQueryClient } from 'react-query';
 import { useAuth } from '../hooks/useAuth';
 import { Repository } from '../types/repositories';
 import { useRepositories, useSSHKeys, useRepositoryMutations } from '../hooks/useRepositories';
@@ -36,6 +39,7 @@ import { CheckResult } from '../components/repositories/RepositoryCard';
 import PassphraseVerifyModal from '../components/repositories/PassphraseVerifyModal';
 
 const Repositories: React.FC = () => {
+  const queryClient = useQueryClient();
   const { user } = useAuth();
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [editingRepo, setEditingRepo] = useState<Repository | null>(null);
@@ -59,6 +63,9 @@ const Repositories: React.FC = () => {
   // Load stats state - tracks loading and loaded stats per repository
   const [loadingStats, setLoadingStats] = useState<Set<string>>(new Set());
   const [repoStats, setRepoStats] = useState<Record<string, { archive_count: number; total_size: string | null; last_backup: string | null }>>({});
+
+  // Break lock state - tracks which repo is being unlocked
+  const [breakingLockRepoId, setBreakingLockRepoId] = useState<string | number | null>(null);
 
   // Toggle expanded state for repository in list view
   const toggleRepoExpanded = (repoPath: string) => {
@@ -237,6 +244,33 @@ const Repositories: React.FC = () => {
     }
   };
 
+  // Break repository lock handler
+  const handleBreakLock = async (repository: Repository) => {
+    const confirmMsg = `Are you sure you want to break the lock on "${repository.name}"?\n\nOnly do this if you're certain no backup is currently running. Breaking an active lock can corrupt the repository.`;
+    
+    if (!window.confirm(confirmMsg)) {
+      return;
+    }
+
+    setBreakingLockRepoId(repository.id);
+    
+    try {
+      const response = await repositoriesAPI.breakLock(repository.path);
+      if (response.data.success) {
+        toast.success('Repository lock broken successfully');
+        // Refetch repositories to update lock status
+        await queryClient.invalidateQueries({ queryKey: ['config-parser-repositories'] });
+      } else {
+        toast.error(response.data.message || 'Failed to break lock');
+      }
+    } catch (error: any) {
+      console.error('Failed to break lock:', error);
+      toast.error(error.response?.data?.detail || 'Failed to break repository lock');
+    } finally {
+      setBreakingLockRepoId(null);
+    }
+  };
+
   const openCreateModal = () => {
     setShowCreateModal(true);
   };
@@ -409,6 +443,16 @@ const Repositories: React.FC = () => {
                     )}
                   </div>
 
+                  {/* Lock Status */}
+                  {repository.is_locked && (
+                    <div className="hidden md:block mr-4">
+                      <span className="text-xs px-2 py-1 bg-red-100 text-red-700 rounded-full flex items-center w-fit">
+                        <Lock className="w-3 h-3 mr-1" />
+                        Locked
+                      </span>
+                    </div>
+                  )}
+
                   {/* Quick Actions */}
                   {user?.is_admin && (
                     <div className="flex items-center space-x-1" onClick={(e) => e.stopPropagation()}>
@@ -540,6 +584,20 @@ const Repositories: React.FC = () => {
                             <Scissors className="w-3 h-3 mr-1" />
                             Prune
                           </button>
+                          {repository.is_locked && (
+                            <button
+                              onClick={() => handleBreakLock(repository)}
+                              disabled={breakingLockRepoId === repository.id}
+                              className="text-xs px-3 py-1.5 bg-red-50 text-red-700 hover:bg-red-100 rounded transition-colors flex items-center disabled:opacity-50"
+                            >
+                              {breakingLockRepoId === repository.id ? (
+                                <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                              ) : (
+                                <Unlock className="w-3 h-3 mr-1" />
+                              )}
+                              {breakingLockRepoId === repository.id ? 'Breaking...' : 'Break Lock'}
+                            </button>
+                          )}
                         </div>
 
                         {/* Check Result Banner (List View) */}
@@ -615,10 +673,12 @@ const Repositories: React.FC = () => {
                 onPrune={() => setPruningRepo(repository)}
                 onDelete={() => handleDeleteRepository(repository)}
                 onLoadStats={() => handleLoadStats(repository)}
+                onBreakLock={() => handleBreakLock(repository)}
                 isAdmin={user?.is_admin}
                 isChecking={checkingRepoId === repository.id}
                 isCompacting={compactRepositoryMutation.isLoading}
                 isLoadingStats={loadingStats.has(repository.path)}
+                isBreakingLock={breakingLockRepoId === repository.id}
                 checkResult={checkResults[repository.path] || null}
                 onDismissCheckResult={() => dismissCheckResult(repository.path)}
               />

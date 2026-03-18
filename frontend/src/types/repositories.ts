@@ -29,6 +29,9 @@ export interface Repository {
   mount_path?: string;
   created_at?: string;
   updated_at?: string | null;
+  // Lock status (detected when querying borg)
+  is_locked?: boolean | null;
+  lock_error?: string | null;
 }
 
 export interface CreateRepositoryForm {

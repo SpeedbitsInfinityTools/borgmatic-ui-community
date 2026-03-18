@@ -14,6 +14,8 @@ import {
   XCircle,
   BarChart3,
   Loader2,
+  Lock,
+  Unlock,
 } from 'lucide-react';
 import { Repository } from '../../types/repositories';
 import { getDisplayPath, getEncryptionIcon, getCompressionLabel } from '../../utils/repositoryUtils';
@@ -39,10 +41,12 @@ interface RepositoryCardProps {
   onPrune?: () => void;
   onDelete: () => void;
   onLoadStats?: () => void;
+  onBreakLock?: () => void;
   isAdmin?: boolean;
   isChecking?: boolean;
   isCompacting?: boolean;
   isLoadingStats?: boolean;
+  isBreakingLock?: boolean;
   checkResult?: CheckResult | null;
   onDismissCheckResult?: () => void;
 }
@@ -61,10 +65,12 @@ const RepositoryCard: React.FC<RepositoryCardProps> = ({
   onPrune,
   onDelete,
   onLoadStats,
+  onBreakLock,
   isAdmin = false,
   isChecking = false,
   isLoadingStats = false,
   isCompacting = false,
+  isBreakingLock = false,
   checkResult = null,
   onDismissCheckResult,
 }) => {
@@ -219,6 +225,41 @@ const RepositoryCard: React.FC<RepositoryCardProps> = ({
               <p className="text-sm text-gray-900">
                 {formatDate(repository.last_backup)}
               </p>
+            </div>
+          )}
+
+          {/* Lock Warning */}
+          {repository.is_locked && (
+            <div className="mt-2 p-3 bg-red-50 border border-red-200 rounded-lg">
+              <div className="flex items-start gap-2">
+                <Lock className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-red-800">Repository is Locked</p>
+                  <p className="text-xs text-red-700 mt-0.5">
+                    A previous backup may have failed or is still running. 
+                    Backups cannot run until the lock is released.
+                  </p>
+                  {onBreakLock && isAdmin && (
+                    <button
+                      onClick={onBreakLock}
+                      disabled={isBreakingLock}
+                      className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-red-700 bg-red-100 hover:bg-red-200 border border-red-300 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {isBreakingLock ? (
+                        <>
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          Breaking Lock...
+                        </>
+                      ) : (
+                        <>
+                          <Unlock className="w-3.5 h-3.5" />
+                          Break Lock
+                        </>
+                      )}
+                    </button>
+                  )}
+                </div>
+              </div>
             </div>
           )}
         </div>

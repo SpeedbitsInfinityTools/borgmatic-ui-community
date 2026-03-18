@@ -69,7 +69,17 @@ class BackupManager {
 
     _extractMssqlSourcesFromHooks(config) {
         const sources = [];
-        const hooks = config.before_backup || [];
+        const hooks = [];
+        if (Array.isArray(config.before_backup)) {
+            hooks.push(...config.before_backup);
+        }
+        // New borgmatic 2.x hook format.
+        if (Array.isArray(config.commands)) {
+            for (const commandHook of config.commands) {
+                if (!commandHook || !Array.isArray(commandHook.run)) continue;
+                hooks.push(...commandHook.run);
+            }
+        }
         const marker = 'BORGMATIC_UI_MSSQL_META_B64:';
 
         for (const hook of hooks) {
@@ -99,6 +109,16 @@ class BackupManager {
         }
 
         return sources;
+    }
+
+    /**
+     * Append a borgmatic 2.x command hook.
+     */
+    _appendCommandHook(config, hook) {
+        if (!Array.isArray(config.commands)) {
+            config.commands = [];
+        }
+        config.commands.push(hook);
     }
 
     /**
@@ -934,23 +954,48 @@ class BackupManager {
         //     config.log_file_verbosity = this.logLevelToVerbosity(backupData.log_level);
         // }
 
-        // Hooks (flat, no 'hooks:' wrapper in new borgmatic format)
-        // Add canary file check as before_backup hook if enabled
+        // Command hooks using borgmatic 2.0+ format
+        // The new 'commands:' syntax replaces deprecated before_backup/after_backup/on_error
+        const commands = [];
+
+        // Add canary file check as before create action if enabled
         if (backupData.canary_file_enabled && backupData.canary_file_path) {
             const canaryCheckCommand = this.buildCanaryCheckCommand(backupData.canary_file_path);
-            config.before_backup = config.before_backup || [];
-            // Add canary check as first hook (before other hooks)
-            config.before_backup.unshift(canaryCheckCommand);
+            commands.push({
+                before: 'action',
+                when: ['create'],
+                run: [canaryCheckCommand]
+            });
         }
         
-        // User-defined hooks
+        // User-defined hooks - convert to new format
         if (backupData.hooks) {
-            if (backupData.hooks.before_backup) {
-                config.before_backup = config.before_backup || [];
-                config.before_backup.push(...backupData.hooks.before_backup);
+            if (backupData.hooks.before_backup && backupData.hooks.before_backup.length > 0) {
+                commands.push({
+                    before: 'action',
+                    when: ['create'],
+                    run: backupData.hooks.before_backup
+                });
             }
-            if (backupData.hooks.after_backup) config.after_backup = backupData.hooks.after_backup;
-            if (backupData.hooks.on_error) config.on_error = backupData.hooks.on_error;
+            if (backupData.hooks.after_backup && backupData.hooks.after_backup.length > 0) {
+                commands.push({
+                    after: 'action',
+                    when: ['create'],
+                    states: ['finish'],
+                    run: backupData.hooks.after_backup
+                });
+            }
+            if (backupData.hooks.on_error && backupData.hooks.on_error.length > 0) {
+                commands.push({
+                    after: 'error',
+                    run: backupData.hooks.on_error
+                });
+            }
+        }
+
+        // Only add commands section if there are any hooks
+        if (commands.length > 0) {
+            config.commands = commands;
         }
 
         // Database configuration - collect password storage promises to await them all
@@ -1112,16 +1157,25 @@ class BackupManager {
                     config.source_directories.push(mssqlTempDir);
                 }
                 
-                // Generate before_backup hook
-                config.before_backup = config.before_backup || [];
-                config.before_backup.push(this.generateMssqlDumpScript(dbSource, mssqlPassEnvVar, mssqlTempDir));
+                // Generate pre-create action hook via borgmatic 2.x "commands:" format
+                this._appendCommandHook(config, {
+                    before: 'action',
+                    when: ['create'],
+                    run: [this.generateMssqlDumpScript(dbSource, mssqlPassEnvVar, mssqlTempDir)],
+                });
                 
-                // Generate after_backup hook for cleanup
-                config.after_backup = config.after_backup || [];
+                // Generate post-create action hook for cleanup
                 // Only add cleanup once (check if already present)
                 const cleanupCmd = `rm -rf "${mssqlTempDir}"`;
-                if (!config.after_backup.includes(cleanupCmd)) {
-                    config.after_backup.push(cleanupCmd);
+                const hasCleanup = Array.isArray(config.commands) && config.commands.some(
+                    (hook) => Array.isArray(hook?.run) && hook.run.includes(cleanupCmd)
+                );
+                if (!hasCleanup) {
+                    this._appendCommandHook(config, {
+                        after: 'action',
+                        when: ['create'],
+                        run: [cleanupCmd],
+                    });
                 }
                 break;
         }

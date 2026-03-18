@@ -357,7 +357,7 @@ class TemplateManager {
                 name: 'SpeedBits Standard',
                 description: 'Complete backup solution for Infinity Tools installations - backs up /opt/speedbits and auto-discovers databases on the borgmatic-db network',
                 is_system_template: true,
-                version: '1.0.0',
+                version: '1.1.0', // Bump version to force template refresh with new hook format
                 status: 'complete',
                 created_at: new Date().toISOString(),
                 updated_at: new Date().toISOString(),

@@ -605,6 +605,10 @@ export const repositoriesAPI = {
   verifyPassphrase: (repoId: string) =>
     api.get(`/repositories/${repoId}/passphrase/verify`),
 
+  // Break repository lock
+  breakLock: (repositoryPath: string) =>
+    api.post('/borgmatic/break-lock', { repositoryPath }),
+
   // Rclone CLI (no RCD required)
   rcloneCheck: () => api.get('/repositories/rclone-check'),
   rcloneListRemotes: () => api.get('/repositories/rclone-remotes'),

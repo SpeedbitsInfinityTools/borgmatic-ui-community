@@ -5,6 +5,36 @@ const passwordManager = require('../../services/password-manager');
 const configParser = require('../../services/config-parser');
 const { getBorgCommand } = require('../../services/borg-version-detector');
 
+/**
+ * Detect if a borg error indicates a locked repository
+ * @param {string} stderr - stderr output from borg command
+ * @param {number} exitCode - exit code from borg command
+ * @returns {boolean}
+ */
+function isLockError(stderr, exitCode) {
+    // Borg 1.x and 2.x both return exit code 105 for lock errors
+    if (exitCode === 105) return true;
+    
+    // Also check stderr for lock-related messages
+    const lockPatterns = [
+        'Failed to create/acquire the lock',
+        'Lock held by',
+        'Repository is already locked',
+        'LockError',
+        'LockTimeout',
+        'lock.exclusive',
+        'Another instance is already running'
+    ];
+    
+    if (stderr) {
+        for (const pattern of lockPatterns) {
+            if (stderr.includes(pattern)) return true;
+        }
+    }
+    
+    return false;
+}
+
 router.get('/', authenticateToken, requireAdmin, async (req, res) => {
     try {
         const repositories = await configParser.getAllRepositoriesWithUsage();
@@ -15,6 +45,8 @@ router.get('/', authenticateToken, requireAdmin, async (req, res) => {
             let actualEncryption = repo.encryption || 'none';
             let archiveCount = 0;
             let totalSize = null;
+            let isLocked = false;
+            let lockError = null;
 
             // Try to get actual encryption from borg info
             try {
@@ -52,15 +84,24 @@ router.get('/', authenticateToken, requireAdmin, async (req, res) => {
                 console.log(`📊 [Repos] Listing archives using Borg ${borgVersion} (${command})...`);
 
                 try {
-                    const { stdout, stderr } = await execa(command, args, {
+                    const result = await execa(command, args, {
                         env,
                         timeout: 10000,
                         reject: false // Don't throw on non-zero exit
                     });
 
-                    console.log(`📊 [Repos] Borg info SUCCESS for ${repo.path}`);
+                    const { stdout, stderr, exitCode } = result;
 
-                    if (stderr && !stderr.includes('Warning')) {
+                    // Check for lock errors
+                    if (isLockError(stderr, exitCode)) {
+                        isLocked = true;
+                        lockError = stderr || `Repository is locked (exit code ${exitCode})`;
+                        console.warn(`🔒 [Repos] Repository is LOCKED: ${repo.path}`);
+                    } else if (exitCode === 0) {
+                        console.log(`📊 [Repos] Borg info SUCCESS for ${repo.path}`);
+                    }
+
+                    if (stderr && !stderr.includes('Warning') && !isLocked) {
                         console.warn('Borg stderr:', stderr);
                     }
 
@@ -104,37 +145,57 @@ router.get('/', authenticateToken, requireAdmin, async (req, res) => {
                         } catch (parseError) {
                             console.error(`❌ [Repos] Failed to parse borg info JSON:`, parseError.message);
                         }
-                    } else {
+                    } else if (!isLocked) {
                         console.warn(`⚠️  [Repos] Borg info returned empty output for ${repo.path}`);
                     }
                 } catch (infoError) {
-                    console.error(`❌ [Repos] Borg info failed for ${repo.path}:`, infoError.message);
-                    if (infoError.stderr) {
-                        console.error(`❌ [Repos] Stderr:`, infoError.stderr);
+                    // Check if this is a lock error
+                    if (isLockError(infoError.stderr, infoError.exitCode)) {
+                        isLocked = true;
+                        lockError = infoError.stderr || infoError.message;
+                        console.warn(`🔒 [Repos] Repository is LOCKED: ${repo.path}`);
+                    } else {
+                        console.error(`❌ [Repos] Borg info failed for ${repo.path}:`, infoError.message);
+                        if (infoError.stderr) {
+                            console.error(`❌ [Repos] Stderr:`, infoError.stderr);
+                        }
                     }
                 }
 
-                // Get archive count using borg list --json
-                try {
-                    const listCmd = getBorgCommand(borgVersion, 'list', {
-                        repoPath: repo.path,
-                        extraArgs: ['--json'],
-                        remotePath: repo.hetzner_borg_version, // For Hetzner Storage Boxes
-                    });
-                    const listResult = await execa(listCmd.command, listCmd.args, {
-                        env,
-                        timeout: 15000,
-                        reject: false
-                    });
-                    if (listResult.stdout && listResult.stdout.trim()) {
-                        const listInfo = JSON.parse(listResult.stdout);
-                        if (Array.isArray(listInfo.archives)) {
-                            archiveCount = listInfo.archives.length;
-                            console.log(`📦 [Repos] Archive count for ${repo.path}: ${archiveCount}`);
+                // Get archive count using borg list --json (skip if repo is locked)
+                if (!isLocked) {
+                    try {
+                        const listCmd = getBorgCommand(borgVersion, 'list', {
+                            repoPath: repo.path,
+                            extraArgs: ['--json'],
+                            remotePath: repo.hetzner_borg_version, // For Hetzner Storage Boxes
+                        });
+                        const listResult = await execa(listCmd.command, listCmd.args, {
+                            env,
+                            timeout: 15000,
+                            reject: false
+                        });
+                        
+                        // Check for lock errors on list command too
+                        if (isLockError(listResult.stderr, listResult.exitCode)) {
+                            isLocked = true;
+                            lockError = listResult.stderr || `Repository is locked (exit code ${listResult.exitCode})`;
+                            console.warn(`🔒 [Repos] Repository is LOCKED (detected on list): ${repo.path}`);
+                        } else if (listResult.stdout && listResult.stdout.trim()) {
+                            const listInfo = JSON.parse(listResult.stdout);
+                            if (Array.isArray(listInfo.archives)) {
+                                archiveCount = listInfo.archives.length;
+                                console.log(`📦 [Repos] Archive count for ${repo.path}: ${archiveCount}`);
+                            }
+                        }
+                    } catch (listError) {
+                        if (isLockError(listError.stderr, listError.exitCode)) {
+                            isLocked = true;
+                            lockError = listError.stderr || listError.message;
+                        } else {
+                            console.warn(`⚠️  [Repos] Could not get archive count for ${repo.path}:`, listError.message);
                         }
                     }
-                } catch (listError) {
-                    console.warn(`⚠️  [Repos] Could not get archive count for ${repo.path}:`, listError.message);
                 }
             } catch (infoError) {
                 // If we can't get borg info, use the stored encryption
@@ -161,7 +222,10 @@ router.get('/', authenticateToken, requireAdmin, async (req, res) => {
                 usedInBackups: repo.usedInBackups,
                 created_at: repo.created_at || new Date().toISOString(),
                 updated_at: null,
-                isDiscovered: repo.isDiscovered || false
+                isDiscovered: repo.isDiscovered || false,
+                // Lock status
+                is_locked: isLocked,
+                lock_error: lockError
             };
         }));
 
@@ -220,7 +284,10 @@ router.get('/list', authenticateToken, requireAdmin, async (req, res) => {
             // These are not available without borg info (use Load Stats)
             archive_count: null,
             total_size: null,
-            last_archive: null
+            last_archive: null,
+            // Lock status not available in fast mode
+            is_locked: null,
+            lock_error: null
         }));
 
         res.json({

@@ -9,8 +9,8 @@ import { MountTestResult } from '../types/repositories';
 export const useRepositories = () => {
   const { data: repositoriesData, isLoading } = useQuery({
     queryKey: ['config-parser-repositories'],
-    // Use repositories fast list (stable IDs, same data used by Templates dropdown)
-    queryFn: () => repositoriesAPI.getRepositoriesFast().then(res => res.data),
+    // Use full list so health/lock status is available in repository management UI.
+    queryFn: () => repositoriesAPI.getRepositories().then(res => res.data),
   });
 
   const repositories = repositoriesData?.data?.repositories || [];
