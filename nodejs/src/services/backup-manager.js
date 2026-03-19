@@ -1017,15 +1017,27 @@ class BackupManager {
     }
 
     /**
+     * Get the hash file path for a canary file.
+     * Hash files are stored in /app/data/canary-hashes/ to avoid permission issues
+     * on mounted host filesystems (e.g., /host/opt/speedbits).
+     */
+    getCanaryHashPath(canaryFilePath) {
+        // Create a safe filename from the canary path
+        // e.g., /host/opt/speedbits/file.txt -> host_opt_speedbits_file.txt.hash
+        const safeName = canaryFilePath.replace(/^\//, '').replace(/\//g, '_') + '.hash';
+        const hashDir = path.join(config.dataDir, 'canary-hashes');
+        return path.join(hashDir, safeName);
+    }
+
+    /**
      * Build canary file check command for before_backup hook
      * This checks if the canary file exists and has not been modified
      */
     buildCanaryCheckCommand(canaryFilePath) {
         const apiUrl = process.env.BORGMATIC_UI_API_URL || 'http://localhost:8000';
-        const crypto = require('crypto');
         
-        // We need to store the original hash somewhere - use a sidecar file
-        const hashFile = `${canaryFilePath}.hash`;
+        // Hash files are stored in app data directory (writable)
+        const hashFile = this.getCanaryHashPath(canaryFilePath);
         
         // This command:
         // 1. Checks if canary file exists

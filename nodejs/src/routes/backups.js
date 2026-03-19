@@ -400,6 +400,22 @@ router.post('/canary-alert', async (req, res) => {
 });
 
 /**
+ * Get the hash file path for a canary file.
+ * Hash files are stored in /app/data/canary-hashes/ to avoid permission issues
+ * on mounted host filesystems (e.g., /host/opt/speedbits).
+ */
+function getCanaryHashPath(canaryFilePath) {
+    const path = require('path');
+    const config = require('../config');
+    
+    // Create a safe filename from the canary path
+    // e.g., /host/opt/speedbits/file.txt -> host_opt_speedbits_file.txt.hash
+    const safeName = canaryFilePath.replace(/^\//, '').replace(/\//g, '_') + '.hash';
+    const hashDir = path.join(config.dataDir, 'canary-hashes');
+    return path.join(hashDir, safeName);
+}
+
+/**
  * Initialize hash for an existing canary file (for user-selected files)
  * POST /api/backups/canary-file/init-hash
  */
@@ -408,6 +424,7 @@ router.post('/canary-file/init-hash', authenticateToken, requireAdmin, async (re
         const { file_path } = req.body;
         const fs = require('fs-extra');
         const crypto = require('crypto');
+        const path = require('path');
 
         if (!file_path) {
             return res.status(400).json({
@@ -429,11 +446,13 @@ router.post('/canary-file/init-hash', authenticateToken, requireAdmin, async (re
         const hash = crypto.createHash('sha256').update(content).digest('hex');
         const stats = await fs.stat(file_path);
 
-        // Save hash to sidecar file
-        const hashFile = `${file_path}.hash`;
+        // Save hash to app data directory (writable)
+        const hashFile = getCanaryHashPath(file_path);
+        await fs.ensureDir(path.dirname(hashFile));
         await fs.writeFile(hashFile, hash);
 
         console.log(`✅ Initialized canary hash for: ${file_path}`);
+        console.log(`   Hash stored at: ${hashFile}`);
 
         res.json({
             success: true,
@@ -496,8 +515,9 @@ router.post('/canary-file/create', authenticateToken, requireAdmin, async (req, 
         // Calculate the hash (for verification)
         const hash = crypto.createHash('sha256').update(content).digest('hex');
 
-        // Save hash to sidecar file for pre-backup verification
-        const hashFile = `${file_path}.hash`;
+        // Save hash to app data directory (writable) instead of next to canary file
+        const hashFile = getCanaryHashPath(file_path);
+        await fs.ensureDir(path.dirname(hashFile));
         await fs.writeFile(hashFile, hash);
 
         console.log(`✅ Created canary file: ${file_path} (${size} bytes)`);
