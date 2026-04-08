@@ -15,6 +15,19 @@ function isLockError(stderr, exitCode) {
     // Borg 1.x and 2.x both return exit code 105 for lock errors
     if (exitCode === 105) return true;
     
+    // Check if this is a permission error, not a lock error
+    // Permission errors can trigger "Failed to create/acquire the lock" messages
+    // but the root cause is permissions, not an actual lock
+    if (stderr) {
+        const lowerStderr = stderr.toLowerCase();
+        if (lowerStderr.includes('permission denied') || 
+            lowerStderr.includes('errno 13') ||
+            lowerStderr.includes('eacces')) {
+            // This is a permission error, not a lock error
+            return false;
+        }
+    }
+    
     // Also check stderr for lock-related messages
     const lockPatterns = [
         'Failed to create/acquire the lock',
@@ -22,13 +35,18 @@ function isLockError(stderr, exitCode) {
         'Repository is already locked',
         'LockError',
         'LockTimeout',
+        'LockFailed',
         'lock.exclusive',
-        'Another instance is already running'
+        'Another instance is already running',
+        'lock timed out',
+        'waiting for lock',
+        'Could not acquire lock'
     ];
     
     if (stderr) {
+        const lowerStderr = stderr.toLowerCase();
         for (const pattern of lockPatterns) {
-            if (stderr.includes(pattern)) return true;
+            if (lowerStderr.includes(pattern.toLowerCase())) return true;
         }
     }
     
@@ -75,18 +93,24 @@ router.get('/', authenticateToken, requireAdmin, async (req, res) => {
                 const { execa } = require('execa');
                 // Use version-appropriate command
                 const borgVersion = repo.borg_version || '1.x'; // Default to 1.x for existing repos
+                
+                // Detect if this is a remote (SSH) repository - needs longer timeout
+                const isRemoteRepo = repo.path.includes('ssh://') || repo.path.includes('@');
+                const timeout = isRemoteRepo ? 30000 : 10000; // 30s for remote, 10s for local
+                
+                // Use --lock-wait=1 to fail quickly if there's a lock
                 const { command, args } = getBorgCommand(borgVersion, 'info', {
                     repoPath: repo.path,
-                    extraArgs: ['--json'],
+                    extraArgs: ['--json', '--lock-wait=1'],
                     remotePath: repo.hetzner_borg_version, // For Hetzner Storage Boxes
                 });
 
-                console.log(`📊 [Repos] Listing archives using Borg ${borgVersion} (${command})...`);
+                console.log(`📊 [Repos] Listing archives using Borg ${borgVersion} (${command}), timeout=${timeout}ms...`);
 
                 try {
                     const result = await execa(command, args, {
                         env,
-                        timeout: 10000,
+                        timeout,
                         reject: false // Don't throw on non-zero exit
                     });
 
@@ -167,12 +191,12 @@ router.get('/', authenticateToken, requireAdmin, async (req, res) => {
                     try {
                         const listCmd = getBorgCommand(borgVersion, 'list', {
                             repoPath: repo.path,
-                            extraArgs: ['--json'],
+                            extraArgs: ['--json', '--lock-wait=1'],
                             remotePath: repo.hetzner_borg_version, // For Hetzner Storage Boxes
                         });
                         const listResult = await execa(listCmd.command, listCmd.args, {
                             env,
-                            timeout: 15000,
+                            timeout: isRemoteRepo ? 30000 : 15000,
                             reject: false
                         });
                         

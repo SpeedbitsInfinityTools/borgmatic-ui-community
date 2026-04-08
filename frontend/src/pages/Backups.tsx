@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import { Link } from 'react-router-dom';
 import {
@@ -19,6 +19,8 @@ import {
   XCircle,
   Eye,
   Download,
+  Upload,
+  Copy,
   ChevronDown,
   ChevronRight,
   FolderOpen,
@@ -82,6 +84,8 @@ const Backups: React.FC = () => {
   const [yamlLoading, setYamlLoading] = useState(false);
   const [viewMode, setViewMode] = useState<'cards' | 'list'>('cards');
   const [expandedBackups, setExpandedBackups] = useState<Set<string>>(new Set());
+  const [duplicatingBackup, setDuplicatingBackup] = useState<BackupConfig | null>(null);
+  const templateFileInputRef = useRef<HTMLInputElement>(null);
 
   // Toggle expanded state for sources
   const toggleSources = (backupId: string) => {
@@ -476,6 +480,86 @@ const Backups: React.FC = () => {
     }
   };
 
+  const handleImportTemplate = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const MAX_TEMPLATE_SIZE = 1024 * 1024; // 1MB
+    if (file.size > MAX_TEMPLATE_SIZE) {
+      toast.error('Template file is too large (max 1MB).');
+      if (templateFileInputRef.current) templateFileInputRef.current.value = '';
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const parsed = JSON.parse(e.target?.result as string);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          toast.error('Invalid template file format.');
+          return;
+        }
+
+        const normalizedTemplate = {
+          name: typeof parsed.name === 'string' ? parsed.name : '',
+          description: typeof parsed.description === 'string' ? parsed.description : '',
+          sources: Array.isArray(parsed.sources) ? parsed.sources : [],
+          repositories: Array.isArray(parsed.repositories) ? parsed.repositories : [],
+          retention_profile_id: typeof parsed.retention_profile_id === 'string' ? parsed.retention_profile_id : 'profile-standard',
+          schedule_id: typeof parsed.schedule_id === 'string' ? parsed.schedule_id : null,
+          exclude_patterns: Array.isArray(parsed.exclude_patterns) ? parsed.exclude_patterns : [],
+          exclude_caches: parsed.exclude_caches !== false,
+          upload_rate_limit: typeof parsed.upload_rate_limit === 'number' ? parsed.upload_rate_limit : 0,
+          archive_name_format: typeof parsed.archive_name_format === 'string' ? parsed.archive_name_format : '{hostname}-{now}',
+          check_frequency: typeof parsed.check_frequency === 'string' ? parsed.check_frequency : '2 weeks',
+          hooks: (parsed.hooks && typeof parsed.hooks === 'object' && !Array.isArray(parsed.hooks)) ? parsed.hooks : {
+            before_backup: [],
+            after_backup: [],
+            on_error: [],
+          },
+          canary_file_enabled: parsed.canary_file_enabled === true,
+          canary_file_path: typeof parsed.canary_file_path === 'string' ? parsed.canary_file_path : '',
+          auto_break_lock: parsed.auto_break_lock === true,
+        };
+
+        if (!normalizedTemplate.name || normalizedTemplate.sources.length === 0 || normalizedTemplate.repositories.length === 0) {
+          toast.error('Invalid template: name, sources, and repositories are required.');
+          return;
+        }
+
+        setSelectedTemplate(normalizedTemplate);
+        setShowCreateModal(true);
+        toast.success(`Template loaded: ${normalizedTemplate.name}`);
+      } catch {
+        toast.error('Failed to parse template file. Please ensure it is valid JSON.');
+      }
+    };
+    reader.readAsText(file);
+
+    // Reset file input so the same file can be selected again
+    if (templateFileInputRef.current) {
+      templateFileInputRef.current.value = '';
+    }
+  };
+
+  const handleDuplicate = (backup: BackupConfig) => {
+    setDuplicatingBackup(backup);
+  };
+
+  const confirmDuplicateBackup = async () => {
+    if (!duplicatingBackup) return;
+    try {
+      const response = await backupsAPI.duplicateBackup(duplicatingBackup.id);
+      const newName = response.data?.data?.name || `Copy - ${duplicatingBackup.name}`;
+      toast.success(`Backup duplicated as "${newName}" (inactive)`);
+      queryClient.invalidateQueries({ queryKey: ['backups'] });
+      queryClient.invalidateQueries({ queryKey: ['config-parser-state'] });
+    } catch (error: any) {
+      toast.error(error.response?.data?.error || 'Failed to duplicate backup');
+    } finally {
+      setDuplicatingBackup(null);
+    }
+  };
+
   const handleToggle = (backup: BackupConfig) => {
     // Don't allow activation if validation failed
     if (!backup.is_active && backup.validation_status === 'invalid') {
@@ -580,6 +664,21 @@ const Backups: React.FC = () => {
             <Plus className="w-5 h-5" />
             <span>Create Backup</span>
           </button>
+          <button
+            onClick={() => templateFileInputRef.current?.click()}
+            className="btn-secondary flex items-center space-x-2"
+            title="Import a previously exported backup template (JSON file)"
+          >
+            <Upload className="w-5 h-5" />
+            <span>Import Template</span>
+          </button>
+          <input
+            ref={templateFileInputRef}
+            type="file"
+            accept=".json"
+            onChange={handleImportTemplate}
+            className="hidden"
+          />
           {showDirectorFeatures && (
             <button
               onClick={() => setShowTemplateSelector(true)}
@@ -769,7 +868,7 @@ const Backups: React.FC = () => {
                     {showSpinner ? (
                       <button
                         onClick={() => handleCancelBackup(backup.id)}
-                        disabled={stopBackupMutation.isPending}
+                        disabled={stopBackupMutation.isLoading}
                         className={`p-1.5 rounded transition-colors ${
                           cancelConfirmBackup === backup.id
                             ? 'bg-red-100 text-red-700'
@@ -798,6 +897,13 @@ const Backups: React.FC = () => {
                       title="Edit"
                     >
                       <Edit2 className="w-4 h-4" />
+                    </button>
+                    <button
+                      onClick={() => handleDuplicate(backup)}
+                      className="p-1.5 text-gray-500 hover:text-purple-600 hover:bg-purple-50 rounded transition-colors"
+                      title="Duplicate backup"
+                    >
+                      <Copy className="w-4 h-4" />
                     </button>
                     <button
                       onClick={() => handleDelete(backup)}
@@ -1308,7 +1414,7 @@ const Backups: React.FC = () => {
                     {showSpinner ? (
                       <button
                         onClick={() => handleCancelBackup(backup.id)}
-                        disabled={stopBackupMutation.isPending}
+                        disabled={stopBackupMutation.isLoading}
                         className={`flex items-center justify-center space-x-2 px-4 py-2 rounded-lg transition-colors font-medium text-sm ${
                           cancelConfirmBackup === backup.id
                             ? 'bg-red-700 text-white'
@@ -1360,6 +1466,13 @@ const Backups: React.FC = () => {
                         title="Export as template"
                       >
                         <Download className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={() => handleDuplicate(backup)}
+                        className="p-2 text-purple-600 hover:text-purple-800 hover:bg-purple-50 rounded transition-colors flex-shrink-0"
+                        title="Duplicate backup"
+                      >
+                        <Copy className="w-4 h-4" />
                       </button>
                       <button
                         onClick={() => handleDelete(backup)}
@@ -1498,6 +1611,48 @@ const Backups: React.FC = () => {
               >
                 <Trash2 className="w-4 h-4 mr-2" />
                 {deleteBackupMutation.isLoading ? 'Deleting...' : 'Delete Backup'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Duplicate Confirmation Modal */}
+      {duplicatingBackup && (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50 flex items-center justify-center p-4">
+          <div className="relative mx-auto p-6 border w-full max-w-md shadow-lg rounded-md bg-white">
+            <div className="flex items-start mb-4">
+              <div className="flex-shrink-0">
+                <Copy className="h-6 w-6 text-purple-600" />
+              </div>
+              <div className="ml-3 flex-1">
+                <h3 className="text-lg font-medium text-gray-900">
+                  Duplicate Backup
+                </h3>
+                <div className="mt-2">
+                  <p className="text-sm text-gray-500">
+                    Really duplicate <span className="font-semibold text-gray-900">"{duplicatingBackup.name}"</span>?
+                  </p>
+                  <p className="text-sm text-gray-500 mt-2">
+                    A copy will be created as <span className="font-semibold text-purple-700">"Copy - {duplicatingBackup.name}"</span> and will be <strong>deactivated</strong> by default.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-5 flex justify-end space-x-3">
+              <button
+                onClick={() => setDuplicatingBackup(null)}
+                className="px-4 py-2 bg-gray-200 text-gray-800 rounded hover:bg-gray-300 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmDuplicateBackup}
+                className="px-4 py-2 bg-purple-600 text-white rounded hover:bg-purple-700 transition-colors flex items-center"
+              >
+                <Copy className="w-4 h-4 mr-2" />
+                Duplicate
               </button>
             </div>
           </div>

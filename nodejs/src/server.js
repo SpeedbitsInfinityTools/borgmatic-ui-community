@@ -408,6 +408,11 @@ async function startServer() {
             // Deploy any missing SSH keys from vault to filesystem
             await deployMissingSSHKeys();
 
+            // Check for locked repositories on startup (non-blocking)
+            checkLockedRepositoriesOnStartup().catch(err => {
+                console.warn('⚠️ Failed to check for locked repositories:', err.message);
+            });
+
             // Initialize Redis cache (optional - for Borg 1.x archive browsing)
             initRedis();
 
@@ -421,6 +426,11 @@ async function startServer() {
 
             // Deploy any missing SSH keys from vault to filesystem
             await deployMissingSSHKeys();
+
+            // Check for locked repositories on startup (non-blocking)
+            checkLockedRepositoriesOnStartup().catch(err => {
+                console.warn('⚠️ Failed to check for locked repositories:', err.message);
+            });
 
             // Initialize Redis cache (optional - for Borg 1.x archive browsing)
             initRedis();
@@ -499,6 +509,121 @@ async function deployMissingSSHKeys() {
         }
     } catch (error) {
         console.error('❌ Failed to check/deploy SSH keys:', error.message);
+        // Non-fatal - continue startup
+    }
+}
+
+/**
+ * Check for locked repositories on startup
+ * Logs warnings about any repositories that appear to be locked
+ * This helps surface stale lock issues early
+ */
+async function checkLockedRepositoriesOnStartup() {
+    try {
+        console.log('🔒 Checking for locked repositories...');
+        
+        const configParser = require('./services/config-parser');
+        const repositories = await configParser.getAllRepositoriesWithUsage();
+        
+        // Filter to repositories that are actually in use and configured
+        const activeRepos = repositories.filter(repo => 
+            repo.path && repo.used_by && repo.used_by.length > 0
+        );
+        
+        if (activeRepos.length === 0) {
+            console.log('🔒 No active repositories to check');
+            return;
+        }
+        
+        // Note: is_locked is populated by the repository list endpoint, not by config-parser directly
+        // For startup check, we do a quick check using borg info
+        const { getBorgCommand } = require('./services/borg-version-detector');
+        const { execa } = require('execa');
+        const passwordManager = require('./services/password-manager');
+        
+        let lockedCount = 0;
+        
+        for (const repo of activeRepos.slice(0, 5)) { // Check first 5 repos max to avoid slow startup
+            try {
+                // Set up environment with passphrase
+                const env = { ...process.env };
+                try {
+                    const passphrase = await passwordManager.getRepositoryPassphrase(repo.path);
+                    if (passphrase) {
+                        env.BORG_PASSPHRASE = passphrase;
+                    }
+                } catch (e) {
+                    // Continue without passphrase - might work for unencrypted repos
+                }
+                
+                const borgVersion = repo.borg_version || '1.x';
+                const { command, args } = getBorgCommand(borgVersion, 'info', {
+                    repoPath: repo.path,
+                    extraArgs: ['--lock-wait=1'], // Fail fast if locked
+                    remotePath: repo.hetzner_borg_version,
+                });
+                
+                const isRemoteRepo = repo.path.includes('ssh://') || repo.path.includes('@');
+                
+                const result = await execa(command, args, {
+                    env,
+                    timeout: isRemoteRepo ? 15000 : 5000, // Quick check
+                    reject: false
+                });
+                
+                // Check if this looks like a lock error
+                if (result.exitCode === 105 || 
+                    (result.stderr && (
+                        result.stderr.includes('Failed to create/acquire the lock') ||
+                        result.stderr.includes('LockTimeout') ||
+                        result.stderr.includes('Repository is already locked')
+                    ) && !result.stderr.toLowerCase().includes('permission denied'))) {
+                    lockedCount++;
+                    const repoLabel = repo.label || repo.name || repo.path;
+                    console.warn(`⚠️  LOCKED: Repository "${repoLabel}" appears to be locked`);
+                    console.warn(`   This may cause backup failures. Use "Break Lock" in the Repositories page to resolve.`);
+                    
+                    // Send notification about locked repository
+                    try {
+                        const notificationRouter = require('./services/notification-router');
+                        await notificationRouter.notifyBackupWarning(
+                            'System Startup',
+                            repo.path,
+                            `Repository "${repoLabel}" is locked - backups may fail`
+                        );
+                    } catch (notifyErr) {
+                        console.warn('Could not send lock notification:', notifyErr.message);
+                    }
+                }
+            } catch (err) {
+                // Timeout or other error - skip this repo
+                if (err.killed || err.timedOut) {
+                    console.warn(`⏱️  Timeout checking repository: ${repo.label || repo.path}`);
+                }
+            }
+        }
+        
+        if (lockedCount === 0) {
+            console.log('🔒 No locked repositories detected');
+        } else {
+            console.warn(`🔒 Found ${lockedCount} locked repository(ies) - check Repositories page`);
+            
+            // Send summary notification if multiple repos are locked
+            if (lockedCount > 1) {
+                try {
+                    const notificationRouter = require('./services/notification-router');
+                    await notificationRouter.notifyBackupWarning(
+                        'System Startup',
+                        null,
+                        `${lockedCount} repositories are locked - backups may fail until locks are cleared`
+                    );
+                } catch (notifyErr) {
+                    console.warn('Could not send lock summary notification:', notifyErr.message);
+                }
+            }
+        }
+    } catch (error) {
+        console.warn('⚠️ Could not check for locked repositories:', error.message);
         // Non-fatal - continue startup
     }
 }
@@ -885,8 +1010,43 @@ function registerClientCommandHandlers(directorClient) {
 startServer();
 
 // Graceful shutdown handling
-process.on('SIGINT', () => {
-    console.log('\n🛑 Received SIGINT, shutting down gracefully...');
+let isShuttingDown = false;
+
+async function gracefulShutdown(signal) {
+    if (isShuttingDown) {
+        console.log(`🛑 Already shutting down, ignoring ${signal}`);
+        return;
+    }
+    isShuttingDown = true;
+    
+    console.log(`\n🛑 Received ${signal}, shutting down gracefully...`);
+    
+    // Stop all running backups to prevent stale locks
+    try {
+        const backupExecutor = require('./services/backup-executor');
+        const runningBackups = backupExecutor.getRunningBackups();
+        
+        if (runningBackups.length > 0) {
+            console.log(`⏳ Stopping ${runningBackups.length} running backup(s) to prevent stale locks...`);
+            
+            // Stop all running backups
+            for (const runningBackup of runningBackups) {
+                const backupId = runningBackup.backup_id;
+                try {
+                    await backupExecutor.stopBackup(backupId);
+                    console.log(`  ✓ Stopped backup: ${backupId}`);
+                } catch (err) {
+                    console.error(`  ✗ Failed to stop backup ${backupId}:`, err.message);
+                }
+            }
+            
+            // Give borgmatic time to clean up locks (max 15 seconds)
+            console.log('⏳ Waiting for backup processes to release locks...');
+            await new Promise(resolve => setTimeout(resolve, 5000));
+        }
+    } catch (error) {
+        console.error('Error stopping backups during shutdown:', error.message);
+    }
 
     // Cleanup Director client if connected
     try {
@@ -897,14 +1057,12 @@ process.on('SIGINT', () => {
     }
 
     eventManager.cleanup();
+    console.log('✓ Shutdown complete');
     process.exit(0);
-});
+}
 
-process.on('SIGTERM', () => {
-    console.log('\n🛑 Received SIGTERM, shutting down gracefully...');
-    eventManager.cleanup();
-    process.exit(0);
-});
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 
 // Error logging configuration and state
 const ERROR_LOG_CONFIG = {

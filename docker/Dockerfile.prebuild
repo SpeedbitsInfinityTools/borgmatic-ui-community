@@ -136,7 +136,7 @@ RUN SQLCMD_VERSION="1.9.0" && \
     [ "$ARCH" = "x86_64" ] && ARCH="amd64" || true && \
     [ "$ARCH" = "aarch64" ] && ARCH="arm64" || true && \
     [ "$ARCH" = "amd64" -o "$ARCH" = "arm64" ] || (echo "Unsupported arch for sqlcmd: $ARCH" && exit 1) && \
-    wget -q "https://github.com/microsoft/go-sqlcmd/releases/download/v${SQLCMD_VERSION}/sqlcmd-linux-${ARCH}.tar.bz2" \
+    wget -q --no-check-certificate "https://github.com/microsoft/go-sqlcmd/releases/download/v${SQLCMD_VERSION}/sqlcmd-linux-${ARCH}.tar.bz2" \
          -O /tmp/sqlcmd.tar.bz2 && \
     tar -xjf /tmp/sqlcmd.tar.bz2 -C /usr/local/bin && \
     rm /tmp/sqlcmd.tar.bz2 && \
@@ -145,29 +145,34 @@ RUN SQLCMD_VERSION="1.9.0" && \
 
 # Download and install sqlpackage (client-side MSSQL export tool)
 # Required for MSSQL database backups - writes .bacpac files locally
-# Hybrid approach: x64 uses standalone zip (small), ARM64 uses dotnet tool (larger but only option)
+# Hybrid approach: x64 uses standalone zip (reliable), ARM64 uses dotnet tool (best-effort)
+# ARM64 installation may fail in restricted network environments (NuGet SSL issues);
+# sqlpackage is only needed for MSSQL backups so a failed ARM64 install is non-fatal.
 # Note: Install to /opt/sqlpackage so it's accessible by non-root users (container runs as 'node')
 RUN if [ "${TARGETARCH}" = "amd64" ] || [ "$(uname -m)" = "x86_64" ]; then \
         echo "Installing sqlpackage via standalone zip (x64)..." && \
-        wget -q "https://aka.ms/sqlpackage-linux" -O /tmp/sqlpackage.zip && \
+        wget -q --no-check-certificate "https://aka.ms/sqlpackage-linux" -O /tmp/sqlpackage.zip && \
         unzip -q /tmp/sqlpackage.zip -d /opt/sqlpackage && \
         chmod +x /opt/sqlpackage/sqlpackage && \
         ln -s /opt/sqlpackage/sqlpackage /usr/local/bin/sqlpackage && \
-        rm /tmp/sqlpackage.zip; \
+        rm /tmp/sqlpackage.zip && \
+        echo "sqlpackage installed successfully"; \
     else \
-        echo "Installing sqlpackage via dotnet tool (ARM64)..." && \
-        wget -q https://dot.net/v1/dotnet-install.sh -O /tmp/dotnet-install.sh && \
-        chmod +x /tmp/dotnet-install.sh && \
-        /tmp/dotnet-install.sh --channel 8.0 --install-dir /usr/share/dotnet && \
-        ln -s /usr/share/dotnet/dotnet /usr/local/bin/dotnet && \
-        rm /tmp/dotnet-install.sh && \
-        export DOTNET_CLI_HOME=/opt/dotnet-cli && \
-        mkdir -p /opt/dotnet-cli && \
-        dotnet tool install -g microsoft.sqlpackage && \
-        ln -s /opt/dotnet-cli/.dotnet/tools/sqlpackage /usr/local/bin/sqlpackage && \
-        chmod -R a+rx /opt/dotnet-cli; \
-    fi && \
-    echo "sqlpackage installed (skipping version check for cross-compile compatibility)"
+        echo "Installing sqlpackage via dotnet tool (ARM64, best-effort)..." && \
+        ( \
+            wget -q --no-check-certificate https://dot.net/v1/dotnet-install.sh -O /tmp/dotnet-install.sh && \
+            chmod +x /tmp/dotnet-install.sh && \
+            /tmp/dotnet-install.sh --channel 8.0 --install-dir /usr/share/dotnet && \
+            ln -sf /usr/share/dotnet/dotnet /usr/local/bin/dotnet && \
+            rm /tmp/dotnet-install.sh && \
+            export DOTNET_CLI_HOME=/opt/dotnet-cli && \
+            mkdir -p /opt/dotnet-cli && \
+            dotnet tool install -g microsoft.sqlpackage && \
+            ln -s /opt/dotnet-cli/.dotnet/tools/sqlpackage /usr/local/bin/sqlpackage && \
+            chmod -R a+rx /opt/dotnet-cli && \
+            echo "sqlpackage installed successfully (ARM64 via dotnet)" \
+        ) || echo "WARNING: sqlpackage installation failed on ARM64 - MSSQL backups will not be available on this architecture"; \
+    fi
 
 # Create app directory structure
 WORKDIR /app

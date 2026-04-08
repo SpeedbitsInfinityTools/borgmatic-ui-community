@@ -38,6 +38,54 @@ import {
 import { CheckResult } from '../components/repositories/RepositoryCard';
 import PassphraseVerifyModal from '../components/repositories/PassphraseVerifyModal';
 
+/**
+ * Extract a meaningful, short error message from a potentially long error string.
+ * Borg errors often include full stack traces - we want just the key message.
+ */
+function extractErrorMessage(error: string, maxLength: number = 150): string {
+  if (!error) return 'An error occurred';
+  
+  // Look for common meaningful error patterns
+  const patterns = [
+    /Permission denied[^.]*\.?/i,
+    /Failed to create\/acquire the lock[^.]*\.?/i,
+    /Repository is already locked/i,
+    /Could not verify passphrase/i,
+    /Connection refused/i,
+    /Connection timed out/i,
+    /No such file or directory/i,
+    /passphrase.*(?:incorrect|wrong|invalid)/i,
+  ];
+  
+  for (const pattern of patterns) {
+    const match = error.match(pattern);
+    if (match) {
+      return match[0].length > maxLength 
+        ? match[0].substring(0, maxLength) + '...' 
+        : match[0];
+    }
+  }
+  
+  // Get the first meaningful line (skip empty lines and "Command failed" prefixes)
+  const lines = error.split('\n').filter(line => {
+    const trimmed = line.trim();
+    return trimmed && 
+           !trimmed.startsWith('Traceback') && 
+           !trimmed.startsWith('File "') &&
+           !trimmed.startsWith('Platform:') &&
+           !trimmed.startsWith('Linux:') &&
+           !trimmed.startsWith('Borg:') &&
+           !trimmed.startsWith('PID:') &&
+           !trimmed.startsWith('sys.argv:') &&
+           !trimmed.startsWith('SSH_ORIGINAL_COMMAND:');
+  });
+  
+  const firstLine = lines[0] || error.substring(0, maxLength);
+  return firstLine.length > maxLength 
+    ? firstLine.substring(0, maxLength) + '...' 
+    : firstLine;
+}
+
 const Repositories: React.FC = () => {
   const queryClient = useQueryClient();
   const { user } = useAuth();
@@ -136,7 +184,8 @@ const Repositories: React.FC = () => {
     } catch (err: any) {
       // If verification fails (e.g., network error), show error
       console.warn('Passphrase verification failed:', err);
-      const errorMsg = err.response?.data?.detail || err.message || 'Could not verify passphrase';
+      const rawError = err.response?.data?.detail || err.message || 'Could not verify passphrase';
+      const errorMsg = extractErrorMessage(rawError);
       toast.error(errorMsg, { duration: 8000 });
     } finally {
       setVerifyingPassphrase(false);
@@ -186,7 +235,8 @@ const Repositories: React.FC = () => {
       }
     } catch (error: any) {
       console.error('Failed to load stats:', error);
-      toast.error(error.response?.data?.detail || 'Failed to load repository stats');
+      const rawError = error.response?.data?.detail || 'Failed to load repository stats';
+      toast.error(extractErrorMessage(rawError));
     } finally {
       setLoadingStats(prev => {
         const newSet = new Set(prev);
@@ -265,7 +315,8 @@ const Repositories: React.FC = () => {
       }
     } catch (error: any) {
       console.error('Failed to break lock:', error);
-      toast.error(error.response?.data?.detail || 'Failed to break repository lock');
+      const rawError = error.response?.data?.detail || 'Failed to break repository lock';
+      toast.error(extractErrorMessage(rawError));
     } finally {
       setBreakingLockRepoId(null);
     }

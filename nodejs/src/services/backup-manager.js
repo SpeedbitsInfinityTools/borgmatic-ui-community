@@ -526,7 +526,8 @@ class BackupManager {
                 retention_profile_id: backupData.retention_profile_id,
                 validation_status: validation.valid ? 'valid' : 'invalid',
                 validation_error: validation.valid ? null : validation.error,
-                validation_date: new Date().toISOString()
+                validation_date: new Date().toISOString(),
+                auto_break_lock: backupData.auto_break_lock === true // Auto-break stale locks before backup
             };
 
             if (!validation.valid) {
@@ -939,6 +940,11 @@ class BackupManager {
         if (backupData.upload_rate_limit !== undefined) {
             config.upload_rate_limit = backupData.upload_rate_limit;
         }
+
+        // Lock wait timeout - fail fast if repo is locked instead of waiting forever
+        // This helps prevent backup jobs from hanging and makes lock issues visible
+        // Default: 60 seconds (configurable per backup)
+        config.lock_wait = backupData.lock_wait !== undefined ? backupData.lock_wait : 60;
 
         // Checks
         if (backupData.check_frequency) {

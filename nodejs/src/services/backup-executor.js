@@ -97,7 +97,7 @@ class BackupExecutor {
             });
 
             // Send notification through router (handles both local and director)
-            const repository = repositories.length > 0 ? repositories[0].path : null;
+            const repository = repositories.length > 0 ? (repositories[0].path || repositories[0]) : null;
             notificationRouter.notifyBackupStarted(backup.name, repository).catch(err => {
                 console.warn('Failed to send backup started notification:', err.message);
             });
@@ -113,7 +113,7 @@ class BackupExecutor {
             // If multiple repos use different passphrases, borgmatic will prompt
             // For now, use the first repository's passphrase as the default
             if (repositories.length > 0) {
-                const repoPath = repositories[0].path;
+                const repoPath = repositories[0].path || repositories[0];
                 try {
                     const passphrase = await passwordManager.getRepositoryPassphrase(repoPath);
                     if (passphrase) {
@@ -206,6 +206,105 @@ class BackupExecutor {
                     }
                 } catch (error) {
                     console.warn(`⚠️  Error retrieving SSH credentials for ${repoPath}:`, error.message);
+                }
+            }
+
+            // Pre-backup lock check with auto-break option.
+            // Use direct Borg probing instead of config-parser fields, since config-parser
+            // doesn't compute transient lock state.
+            const autoBreakLock = backup.auto_break_lock === true;
+            const { getBorgCommand } = require('./borg-version-detector');
+            const { execa } = require('execa');
+            const borgmaticCLI = require('./borgmatic-cli');
+            const isLockError = (stderr, exitCode) => {
+                if (exitCode === 105) return true;
+                if (!stderr) return false;
+                const lower = String(stderr).toLowerCase();
+                // Don't misclassify permission errors as lock errors.
+                if (lower.includes('permission denied') || lower.includes('errno 13') || lower.includes('eacces')) {
+                    return false;
+                }
+                const lockPatterns = [
+                    'failed to create/acquire the lock',
+                    'lock held by',
+                    'repository is already locked',
+                    'lockerror',
+                    'locktimeout',
+                    'lockfailed',
+                    'lock.exclusive',
+                    'another instance is already running',
+                    'lock timed out',
+                    'waiting for lock',
+                    'could not acquire lock'
+                ];
+                return lockPatterns.some((p) => lower.includes(p));
+            };
+
+            for (const repoConfig of repositories) {
+                const repoPathForCheck = repoConfig.path || repoConfig;
+                const repo = allRepos.find(r => r.path === repoPathForCheck);
+                const repoLabel = repo?.label || repo?.name || repoPathForCheck;
+
+                try {
+                    const borgVersion = repo?.borg_version || '1.x';
+                    const { command, args } = getBorgCommand(borgVersion, 'info', {
+                        repoPath: repoPathForCheck,
+                        extraArgs: ['--lock-wait=1'],
+                        remotePath: repo?.hetzner_borg_version,
+                    });
+                    const isRemoteRepo = repoPathForCheck.includes('ssh://') || repoPathForCheck.includes('@');
+                    const probeResult = await execa(command, args, {
+                        env,
+                        timeout: isRemoteRepo ? 30000 : 10000,
+                        reject: false,
+                    });
+
+                    if (isLockError(probeResult.stderr, probeResult.exitCode)) {
+                        console.warn(`⚠️ Repository "${repoLabel}" is locked`);
+                        console.warn(`   Lock error: ${probeResult.stderr || `Exit code ${probeResult.exitCode}`}`);
+
+                        notificationRouter.notifyBackupWarning(
+                            backup.name,
+                            repoPathForCheck,
+                            `Repository "${repoLabel}" is locked`
+                        ).catch(err => {
+                            console.warn('Failed to send lock warning notification:', err.message);
+                        });
+
+                        if (autoBreakLock) {
+                            console.log(`🔓 Auto-break lock enabled - attempting to break lock on "${repoLabel}"...`);
+                            try {
+                                const breakResult = await borgmaticCLI.breakLock(repoPathForCheck, {
+                                    timeout: 30000,
+                                    env
+                                });
+
+                                if (breakResult.success) {
+                                    console.log(`✅ Successfully broke lock on "${repoLabel}"`);
+                                    notificationRouter.notifyBackupWarning(
+                                        backup.name,
+                                        repoPathForCheck,
+                                        `Auto-broke stale lock on "${repoLabel}"`
+                                    ).catch(() => {});
+                                } else {
+                                    console.error(`❌ Failed to break lock on "${repoLabel}": ${breakResult.error || breakResult.stderr}`);
+                                    notificationRouter.notifyBackupWarning(
+                                        backup.name,
+                                        repoPathForCheck,
+                                        `Failed to auto-break lock on "${repoLabel}": ${breakResult.error || 'Unknown error'}`
+                                    ).catch(() => {});
+                                }
+                            } catch (breakError) {
+                                console.error(`❌ Error breaking lock on "${repoLabel}":`, breakError.message);
+                            }
+                        } else {
+                            console.warn('   Auto-break not enabled. Enable "Auto-break stale locks" in backup settings to automatically resolve.');
+                            console.warn('   Or use the "Break Lock" button in the Repositories page.');
+                        }
+                    }
+                } catch (lockProbeError) {
+                    // Non-fatal: lock probing is best-effort and should not block backup start.
+                    console.warn(`⚠️ Could not probe lock status for "${repoLabel}":`, lockProbeError.message);
                 }
             }
 

@@ -110,6 +110,8 @@ const BackupWizard: React.FC<BackupWizardProps> = ({
     // Canary file for ransomware detection
     canary_file_enabled: dataSource?.canary_file_enabled || false,
     canary_file_path: dataSource?.canary_file_path || '',
+    // Auto-break stale locks before backup
+    auto_break_lock: dataSource?.auto_break_lock || false,
   });
 
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -591,6 +593,8 @@ const BackupWizard: React.FC<BackupWizardProps> = ({
         // Canary file settings
         canary_file_enabled: formData.canary_file_enabled,
         canary_file_path: formData.canary_file_enabled ? formData.canary_file_path : null,
+        // Lock handling
+        auto_break_lock: formData.auto_break_lock,
       };
 
       createBackupMutation.mutate(submitData);
@@ -2373,6 +2377,35 @@ const BackupWizard: React.FC<BackupWizardProps> = ({
                       )}
                     </div>
                   )}
+
+                  {/* Auto-break Stale Locks Option */}
+                  <div className="border border-blue-200 bg-blue-50 rounded-lg p-4">
+                    <div className="flex items-start">
+                      <input
+                        type="checkbox"
+                        id="auto_break_lock"
+                        checked={formData.auto_break_lock}
+                        onChange={(e) => {
+                          setFormData({
+                            ...formData,
+                            auto_break_lock: e.target.checked,
+                          });
+                        }}
+                        className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded mt-1"
+                      />
+                      <label htmlFor="auto_break_lock" className="ml-2 block text-sm text-gray-700">
+                        <span className="font-medium text-blue-800">Auto-break Stale Locks</span>
+                        <span className="block text-xs text-gray-600 mt-1">
+                          Automatically break repository locks before running this backup. Useful if backups 
+                          occasionally fail due to stale locks from interrupted previous runs.
+                        </span>
+                        <span className="block text-xs text-amber-600 mt-1">
+                          <strong>Note:</strong> Only enable this if you're sure no other backup process is running 
+                          against the same repository, as breaking an active lock could cause data corruption.
+                        </span>
+                      </label>
+                    </div>
+                  </div>
                 </div>
 
                 {/* Right Column - Exclude Patterns */}

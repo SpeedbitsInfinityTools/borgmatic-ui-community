@@ -672,6 +672,9 @@ export const backupsAPI = {
   // Export as template
   exportAsTemplate: (id: string) => api.get(`/backups/${id}/export-template`),
 
+  // Duplicate backup
+  duplicateBackup: (id: string) => api.post(`/backups/${id}/duplicate`),
+
   // Get YAML content for a backup
   getYamlContent: (id: string) => api.get(`/backups/${id}/yaml`),
 

@@ -22,7 +22,23 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
       <BrowserRouter>
         <AuthProvider>
           <App />
-          <Toaster position="top-center" />
+          <Toaster 
+            position="top-center" 
+            toastOptions={{
+              style: {
+                maxWidth: '500px',
+                wordBreak: 'break-word',
+              },
+              error: {
+                duration: 8000,
+                style: {
+                  maxWidth: '500px',
+                  maxHeight: '200px',
+                  overflow: 'auto',
+                },
+              },
+            }}
+          />
         </AuthProvider>
       </BrowserRouter>
     </QueryClientProvider>

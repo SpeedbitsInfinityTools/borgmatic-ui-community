@@ -320,6 +320,103 @@ router.get('/:id/export-template', authenticateToken, async (req, res) => {
 });
 
 /**
+ * Duplicate a backup configuration
+ * POST /api/backups/:id/duplicate
+ */
+router.post('/:id/duplicate', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        const allBackups = await backupManager.getAllBackups();
+        const sourceBackup = allBackups.find(b => b.id === req.params.id);
+
+        if (!sourceBackup) {
+            return res.status(404).json({
+                success: false,
+                error: 'Backup not found'
+            });
+        }
+
+        const sourceConfig = sourceBackup.config || {};
+        const repositories = sourceConfig.repositories || sourceConfig.location?.repositories || [];
+        const sources = backupManager.extractSourcesFromConfig(sourceConfig);
+
+        // Convert command hooks back to wizard hook fields for createBackup().
+        const hooks = { before_backup: [], after_backup: [], on_error: [] };
+        let canaryFilePath = '';
+        if (Array.isArray(sourceConfig.before_backup)) {
+            hooks.before_backup.push(...sourceConfig.before_backup);
+        }
+        if (Array.isArray(sourceConfig.after_backup)) {
+            hooks.after_backup.push(...sourceConfig.after_backup);
+        }
+        if (Array.isArray(sourceConfig.on_error)) {
+            hooks.on_error.push(...sourceConfig.on_error);
+        }
+        if (Array.isArray(sourceConfig.commands)) {
+            for (const commandHook of sourceConfig.commands) {
+                if (!commandHook || !Array.isArray(commandHook.run) || commandHook.run.length === 0) continue;
+                const runCommands = commandHook.run.filter(Boolean);
+                if (!runCommands.length) continue;
+
+                // Detect generated canary check hook and keep it as structured canary settings.
+                const canaryCommand = runCommands.find(cmd =>
+                    typeof cmd === 'string' &&
+                    cmd.includes('CANARY=') &&
+                    cmd.includes('/api/backups/canary-alert')
+                );
+                if (canaryCommand) {
+                    const match = canaryCommand.match(/CANARY="([^"]+)"/);
+                    if (match?.[1]) canaryFilePath = match[1];
+                    continue;
+                }
+
+                if (commandHook.before === 'action' && Array.isArray(commandHook.when) && commandHook.when.includes('create')) {
+                    hooks.before_backup.push(...runCommands);
+                } else if (commandHook.after === 'action' && Array.isArray(commandHook.when) && commandHook.when.includes('create')) {
+                    hooks.after_backup.push(...runCommands);
+                } else if (commandHook.after === 'error') {
+                    hooks.on_error.push(...runCommands);
+                }
+            }
+        }
+
+        const duplicateData = {
+            name: `Copy - ${sourceBackup.name}`,
+            description: sourceBackup.description || '',
+            sources,
+            repositories,
+            retention_profile_id: sourceBackup.retention_profile_id || 'profile-standard',
+            schedule_id: sourceBackup.schedule_id || null,
+            exclude_patterns: sourceConfig.exclude_patterns || [],
+            exclude_caches: sourceConfig.exclude_caches !== false,
+            upload_rate_limit: sourceConfig.upload_rate_limit || 0,
+            archive_name_format: sourceConfig.archive_name_format || '{hostname}-{now}',
+            check_frequency: backupManager.extractCheckFrequency(sourceConfig),
+            lock_wait: sourceConfig.lock_wait,
+            hooks,
+            canary_file_enabled: !!canaryFilePath,
+            canary_file_path: canaryFilePath,
+            auto_break_lock: sourceBackup.auto_break_lock === true,
+            is_active: false, // Duplicates are always inactive
+        };
+
+        const newBackup = await backupManager.createBackup(duplicateData);
+
+        res.status(201).json({
+            success: true,
+            message: `Backup duplicated as "${newBackup.name}"`,
+            data: newBackup
+        });
+    } catch (error) {
+        console.error('Failed to duplicate backup:', error);
+        const status = error.message.includes('not found') ? 404 : 500;
+        res.status(status).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+/**
  * Get YAML content for a backup
  * GET /api/backups/:id/yaml
  */
