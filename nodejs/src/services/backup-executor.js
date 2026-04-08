@@ -348,20 +348,26 @@ class BackupExecutor {
             const logSettings = await logManager.getSettings();
             
             // Detect if this backup has database sources (non-local).
-            // borgmatic's --json flag is incompatible with database hooks
-            // (causes "Expecting value: line 1 column 1" JSON parse crash).
+            // borgmatic's --json and --stats flags trigger internal JSON parsing
+            // that is incompatible with database hooks, causing
+            // "Expecting value: line 1 column 1" crashes during prune/compact.
             const hasDatabaseSources = (backup.sources_summary || []).some(
                 s => s.type && s.type !== 'local'
             );
 
             const args = [
                 '--config', configPath,
-                '--verbosity', '1',
-                '--stats',
             ];
 
-            if (!hasDatabaseSources) {
-                args.push('--json');
+            if (hasDatabaseSources) {
+                // Database backups: text output only (--verbosity 1).
+                // --json and --stats both trigger internal JSON parsing in borgmatic
+                // that crashes with "Expecting value" during prune/compact when
+                // database hooks are active.
+                args.push('--verbosity', '1');
+            } else {
+                // File-only backups: safe to use --stats and --json for richer output.
+                args.push('--verbosity', '1', '--stats', '--json');
             }
             
             // Add logging options if enabled

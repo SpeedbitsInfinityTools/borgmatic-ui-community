@@ -46,7 +46,7 @@ RUN python3 -m venv /opt/borg1-venv \
 # Also install borgmatic here (works with both Borg versions)
 RUN python3 -m venv /opt/borg2-venv \
     && /opt/borg2-venv/bin/pip install --upgrade pip \
-    && /opt/borg2-venv/bin/pip install borgbackup==2.0.0b20 borgmatic boto3 \
+    && /opt/borg2-venv/bin/pip install borgbackup==2.0.0b20 borgmatic==2.1.4 boto3 \
     && ln -s /opt/borg2-venv/bin/borg /usr/bin/borg2 \
     && ln -s /opt/borg2-venv/bin/borg /usr/bin/borg \
     && ln -s /opt/borg2-venv/bin/borgmatic /usr/bin/borgmatic
