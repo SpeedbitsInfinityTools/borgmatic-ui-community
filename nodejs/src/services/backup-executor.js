@@ -347,15 +347,22 @@ class BackupExecutor {
             // Get log settings
             const logSettings = await logManager.getSettings();
             
-            // Execute borgmatic with JSON output
-            // Note: --list and --json cannot be used together with the create action
-            // https://torsion.org/borgmatic/docs/reference/command-line/
+            // Detect if this backup has database sources (non-local).
+            // borgmatic's --json flag is incompatible with database hooks
+            // (causes "Expecting value: line 1 column 1" JSON parse crash).
+            const hasDatabaseSources = (backup.sources_summary || []).some(
+                s => s.type && s.type !== 'local'
+            );
+
             const args = [
                 '--config', configPath,
                 '--verbosity', '1',
                 '--stats',
-                '--json', // JSON output for scripting (includes file list in output)
             ];
+
+            if (!hasDatabaseSources) {
+                args.push('--json');
+            }
             
             // Add logging options if enabled
             if (logSettings.enabled && logSettings.log_to_file) {
