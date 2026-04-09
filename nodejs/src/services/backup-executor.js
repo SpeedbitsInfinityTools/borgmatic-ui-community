@@ -217,7 +217,7 @@ class BackupExecutor {
             const { execa } = require('execa');
             const borgmaticCLI = require('./borgmatic-cli');
             const isLockError = (stderr, exitCode) => {
-                if (exitCode === 105) return true;
+                if (!stderr && exitCode !== 1 && exitCode !== 2) return false;
                 if (!stderr) return false;
                 const lower = String(stderr).toLowerCase();
                 // Don't misclassify permission errors as lock errors.
@@ -312,7 +312,7 @@ class BackupExecutor {
             // We scan the YAML for placeholders like ${BORGMATIC_UI_DB_PASS_*} and populate those env vars.
             try {
                 const yamlText = await fs.readFile(configPath, 'utf8');
-                const matches = Array.from(yamlText.matchAll(/\$\{(BORGMATIC_UI_DB_PASS_[A-Za-z0-9_]+)\}/g)).map(m => m[1]);
+                const matches = Array.from(yamlText.matchAll(/\$\{(BORGMATIC_UI_DB_PASS_[A-Za-z0-9_]+)/g)).map(m => m[1]);
                 const uniqueEnvVars = Array.from(new Set(matches));
                 
                 if (uniqueEnvVars.length > 0) {
@@ -427,9 +427,17 @@ class BackupExecutor {
                     const duration = Date.now() - new Date(startTime).getTime();
                     
                     try {
-                        if (code === 0) {
-                            // Success
-                            console.log(`✅ Backup completed: ${backup.name} (${Math.round(duration / 1000)}s)`);
+                        if (code === 0 || code === 1) {
+                            // code 0 = success, code 1 = completed with warnings
+                            // (e.g. some files were unreadable — borg skipped them)
+                            const hasWarnings = code === 1;
+                            const status = hasWarnings ? 'warning' : 'success';
+
+                            if (hasWarnings) {
+                                console.log(`⚠️ Backup completed with warnings: ${backup.name} (${Math.round(duration / 1000)}s)`);
+                            } else {
+                                console.log(`✅ Backup completed: ${backup.name} (${Math.round(duration / 1000)}s)`);
+                            }
                             
                             // Parse JSON output if available
                             let jsonOutput = null;
@@ -446,7 +454,7 @@ class BackupExecutor {
                             try {
                                 await backupManager.updateBackupMetadata(backupId, {
                                     last_run: new Date().toISOString(),
-                                    last_run_status: 'success'
+                                    last_run_status: status
                                 });
                             } catch (metaError) {
                                 console.error('Failed to update backup metadata:', metaError.message);
@@ -458,17 +466,19 @@ class BackupExecutor {
                                 backup_id: backupId,
                                 backup_name: backup.name,
                                 completed_at: new Date().toISOString(),
-                                status: 'success',
+                                status,
                                 duration,
                                 output: jsonOutput || stdoutData,
-                                stats: jsonOutput?.statistics || null
+                                stats: jsonOutput?.statistics || null,
+                                warnings: hasWarnings ? (stderrData || 'Completed with warnings') : null
                             });
                             console.log(`✅ backup_completed event broadcasted for: ${backup.name}`);
 
                             // Send notification through router (handles both local and director)
                             notificationRouter.notifyBackupCompleted(backup.name, repository, { 
                                 duration, 
-                                stats: jsonOutput?.statistics || null 
+                                stats: jsonOutput?.statistics || null,
+                                warnings: hasWarnings ? (stderrData || 'Completed with warnings') : null
                             }).catch(err => {
                                 console.warn('Failed to send backup completed notification:', err.message);
                             });
@@ -480,7 +490,8 @@ class BackupExecutor {
                                 success: true,
                                 output: stdoutData,
                                 jsonOutput,
-                                duration
+                                duration,
+                                warnings: hasWarnings ? stderrData : null
                             });
                         } else {
                             // Failure

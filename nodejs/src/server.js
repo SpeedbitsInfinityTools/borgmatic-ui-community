@@ -572,12 +572,11 @@ async function checkLockedRepositoriesOnStartup() {
                 });
                 
                 // Check if this looks like a lock error
-                if (result.exitCode === 105 || 
-                    (result.stderr && (
+                if (result.stderr && (
                         result.stderr.includes('Failed to create/acquire the lock') ||
                         result.stderr.includes('LockTimeout') ||
                         result.stderr.includes('Repository is already locked')
-                    ) && !result.stderr.toLowerCase().includes('permission denied'))) {
+                    ) && !result.stderr.toLowerCase().includes('permission denied')) {
                     lockedCount++;
                     const repoLabel = repo.label || repo.name || repo.path;
                     console.warn(`⚠️  LOCKED: Repository "${repoLabel}" appears to be locked`);

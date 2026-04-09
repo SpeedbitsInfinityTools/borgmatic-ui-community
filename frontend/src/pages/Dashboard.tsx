@@ -924,6 +924,8 @@ export default function Dashboard() {
                         <td className="px-6 py-4 whitespace-nowrap">
                           {backup.last_run_status === 'success' ? (
                             <CheckCircle className="w-5 h-5 text-green-600" />
+                          ) : backup.last_run_status === 'warning' ? (
+                            <AlertTriangle className="w-5 h-5 text-yellow-500" />
                           ) : backup.last_run_status === 'failed' ? (
                             <XCircle className="w-5 h-5 text-red-600" />
                           ) : (

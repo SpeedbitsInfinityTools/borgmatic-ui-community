@@ -81,6 +81,16 @@ function setCachedListing(cacheKey, data, isRoot = false) {
 }
 
 /**
+ * Borg returns UTC timestamps without timezone suffix (e.g. "2026-04-09T09:50:20.000000").
+ * Without a trailing "Z", JavaScript's Date() treats them as local time, causing wrong display.
+ */
+function ensureUtcTimestamp(ts) {
+    if (!ts || typeof ts !== 'string') return ts;
+    if (/[Zz]$/.test(ts) || /[+-]\d{2}:\d{2}$/.test(ts)) return ts;
+    return ts + 'Z';
+}
+
+/**
  * Format bytes to human-readable string
  */
 function formatBytes(bytes) {
@@ -1770,7 +1780,7 @@ router.get('/:repositoryPath(*)', authenticateToken, async (req, res) => {
                         return {
                             name: archiveName,
                             id: archiveId,
-                            created: arc.time || arc.start || new Date().toISOString(),
+                            created: ensureUtcTimestamp(arc.time || arc.start) || new Date().toISOString(),
                             backup_job: backupJobName, // Actual backup job name from config
                             backup_job_prefix: archivePrefix, // Prefix extracted from archive name
                             size: 'Unknown', // Size requires separate borg info call

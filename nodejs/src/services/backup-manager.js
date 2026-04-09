@@ -1032,6 +1032,14 @@ class BackupManager {
         // Default: 60 seconds (configurable per backup)
         config.lock_wait = backupData.lock_wait !== undefined ? backupData.lock_wait : 60;
 
+        // Borgmatic 2.x treats borg exit code 105 (permission warning: unreadable
+        // files) as a fatal error by default. In borg 1.x this was just a warning.
+        // Treat it as a warning so the backup completes with the files that ARE
+        // accessible, rather than aborting the entire job.
+        config.borg_exit_codes = [
+            { code: 105, treat_as: 'warning' },
+        ];
+
         // Checks
         if (backupData.check_frequency) {
             config.checks = this.buildChecksConfig(backupData.check_frequency);
@@ -1240,7 +1248,8 @@ class BackupManager {
         } else if (hookEligible && !useNativeHook) {
             // Default: dump to temp directory via command hooks (reliable with all repo types)
             const safeBackup = String(backupId || 'unknown').replace(/[^A-Za-z0-9_]/g, '_');
-            const tempDir = `/tmp/borgmatic_db_dumps_${safeBackup}_${dbSource.type}_${dbIndex}`;
+            const safeHost = String(dbSource.is_host_database ? 'host' : (dbSource.hostname || 'localhost')).replace(/[^A-Za-z0-9_.-]/g, '_');
+            const tempDir = `/tmp/borgmatic_db_dumps_${safeBackup}_${dbSource.type}_${dbIndex}_${safeHost}`;
             const passEnvVar = (typeof passwordValue === 'string' && passwordValue.startsWith('${'))
                 ? passwordValue.slice(2, -1)
                 : null;

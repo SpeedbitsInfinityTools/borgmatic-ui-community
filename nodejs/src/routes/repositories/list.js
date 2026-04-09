@@ -12,8 +12,8 @@ const { getBorgCommand } = require('../../services/borg-version-detector');
  * @returns {boolean}
  */
 function isLockError(stderr, exitCode) {
-    // Borg 1.x and 2.x both return exit code 105 for lock errors
-    if (exitCode === 105) return true;
+    // Note: exit code 105 in borgmatic 2.x is a PERMISSION warning (files
+    // borg cannot read), NOT a lock error. Do not treat it as a lock.
     
     // Check if this is a permission error, not a lock error
     // Permission errors can trigger "Failed to create/acquire the lock" messages

@@ -461,7 +461,9 @@ router.get('/:id/stats', authenticateToken, requireAdmin, async (req, res) => {
                         const sorted = listInfo.archives.sort((a, b) => 
                             new Date(b.start || b.time).getTime() - new Date(a.start || a.time).getTime()
                         );
-                        lastArchive = sorted[0].start || sorted[0].time;
+                        const rawTs = sorted[0].start || sorted[0].time;
+                        lastArchive = rawTs && !/[Zz]$/.test(rawTs) && !/[+-]\d{2}:\d{2}$/.test(rawTs)
+                            ? rawTs + 'Z' : rawTs;
                     }
                     console.log(`📦 [Stats] Archive count: ${archiveCount}, last: ${lastArchive}`);
                 }
