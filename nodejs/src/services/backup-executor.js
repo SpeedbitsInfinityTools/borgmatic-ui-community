@@ -347,26 +347,27 @@ class BackupExecutor {
             // Get log settings
             const logSettings = await logManager.getSettings();
             
-            // Detect if this backup has database sources (non-local).
-            // borgmatic's --json and --stats flags trigger internal JSON parsing
-            // that is incompatible with database hooks, causing
-            // "Expecting value: line 1 column 1" crashes during prune/compact.
-            const hasDatabaseSources = (backup.sources_summary || []).some(
-                s => s.type && s.type !== 'local'
+            // Check if borgmatic's native database hooks (FIFO/streaming) are active.
+            // Native hooks use mariadb_databases/mysql_databases/etc. in the YAML,
+            // which triggers borgmatic's internal JSON parsing that is incompatible
+            // with SSH warnings, causing "Expecting value" crashes during prune/compact.
+            // Backups using dump_method:'local' (command hooks) are safe since they
+            // produce regular files, not FIFOs.
+            const hasNativeDatabaseHooks = (backup.sources_summary || []).some(
+                s => s.type && s.type !== 'local' && s.type !== 'sqlite' && s.type !== 'mssql'
+                    && s.dump_method === 'native'
             );
 
             const args = [
                 '--config', configPath,
             ];
 
-            if (hasDatabaseSources) {
-                // Database backups: text output only (--verbosity 1).
-                // --json and --stats both trigger internal JSON parsing in borgmatic
-                // that crashes with "Expecting value" during prune/compact when
-                // database hooks are active.
+            if (hasNativeDatabaseHooks) {
+                // Native borgmatic database hooks active: text output only.
+                // --json and --stats trigger internal JSON parsing that can crash.
                 args.push('--verbosity', '1');
             } else {
-                // File-only backups: safe to use --stats and --json for richer output.
+                // File-only or dump-to-file database backups: safe to use --stats and --json.
                 args.push('--verbosity', '1', '--stats', '--json');
             }
             

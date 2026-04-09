@@ -23,7 +23,7 @@ module.exports = {
     id: 'infinity-tools',
     name: 'Infinity Tools Backup',
     description: `Complete backup solution for Infinity Tools installations - backs up all applications and databases from ${BACKUP_SOURCE}`,
-    version: '1.1.0',  // Version bump for mount path change
+    version: '1.2.0',  // Version bump: switch DB hooks to dump-to-file approach
     official: true, // Built-in template
     vendor: 'SpeedBits',
     icon: '🏗️',

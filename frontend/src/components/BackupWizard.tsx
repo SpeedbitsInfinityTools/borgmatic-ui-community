@@ -1361,6 +1361,34 @@ const BackupWizard: React.FC<BackupWizardProps> = ({
                             </select>
                           </div>
                         )}
+                        {/* Dump method selector for supported DB types */}
+                        {['mariadb', 'mysql', 'postgresql', 'mongodb'].includes(source.type) && (
+                          <div className="flex items-center gap-2 pl-7 mt-2">
+                            <span className="text-xs text-gray-500">Dump method:</span>
+                            <select
+                              value={source.dump_method || 'local'}
+                              onChange={(e) => updateSource(index, 'dump_method', e.target.value)}
+                              className="px-2 py-0.5 text-xs border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white"
+                            >
+                              <option value="local">Dump locally, then backup</option>
+                              <option value="native">Borgmatic streaming (experimental)</option>
+                            </select>
+                            <div className="relative group">
+                              <AlertCircle className="w-3.5 h-3.5 text-gray-400 cursor-help" />
+                              <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-72 p-2 bg-gray-900 text-white text-xs rounded-lg shadow-lg opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50">
+                                <p className="font-semibold mb-1">Dump locally (recommended):</p>
+                                <p className="mb-1.5">Runs the database client (e.g. mariadb-dump) to create a dump file first, then backs up that file. Works reliably with all repository types including remote SSH repos.</p>
+                                <p className="font-semibold mb-1">Borgmatic streaming (experimental):</p>
+                                <p>Uses borgmatic's native FIFO/pipe mechanism to stream the dump directly into the archive without touching disk. Saves disk space for very large databases, but may fail with remote SSH repositories due to a known borgmatic bug with JSON parsing.</p>
+                              </div>
+                            </div>
+                            {source.dump_method === 'native' && (
+                              <span className="text-xs text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">
+                                experimental
+                              </span>
+                            )}
+                          </div>
+                        )}
                         <div className="flex items-center gap-2 pl-7 mt-2">
                           {source.database_name === 'all' && (
                             <span className="text-xs text-purple-600 bg-purple-50 px-2 py-0.5 rounded">

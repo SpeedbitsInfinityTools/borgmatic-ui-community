@@ -20,10 +20,11 @@ class BackupManager {
         this.metadataPath = path.join(config.configDir, 'backups-metadata.yaml');
     }
 
-    _isMssqlTempPath(dir) {
+    _isDumpTempPath(dir) {
         return typeof dir === 'string' && (
             dir === '/tmp/borgmatic_mssql_dumps' ||
-            dir.startsWith('/tmp/borgmatic_mssql_dumps_')
+            dir.startsWith('/tmp/borgmatic_mssql_dumps_') ||
+            dir.startsWith('/tmp/borgmatic_db_dumps_')
         );
     }
 
@@ -67,6 +68,47 @@ class BackupManager {
         return { dbName, host, user, port: rawPort, instance, encrypt };
     }
 
+    _validateHookDbInputs(dbSource) {
+        const supported = ['mariadb', 'mysql', 'postgresql', 'mongodb'];
+        if (!supported.includes(dbSource?.type)) {
+            throw new Error(`Unsupported database type: ${dbSource?.type || 'unknown'}`);
+        }
+
+        const dbName = String(dbSource.database_name || '').trim();
+        if (!dbName) {
+            throw new Error(`${dbSource.type} database name is required`);
+        }
+        if (dbName !== 'all' && !/^[A-Za-z0-9_.-]+$/.test(dbName)) {
+            throw new Error(`Invalid ${dbSource.type} database name`);
+        }
+
+        const host = dbSource.is_host_database ? 'host.docker.internal' : String(dbSource.hostname || 'localhost').trim();
+        if (!/^[A-Za-z0-9.-]+$/.test(host)) {
+            throw new Error(`Invalid ${dbSource.type} hostname`);
+        }
+
+        const rawPort = Number(dbSource.port || this._getDefaultPort(dbSource.type));
+        if (!Number.isInteger(rawPort) || rawPort < 1 || rawPort > 65535) {
+            throw new Error(`Invalid ${dbSource.type} port`);
+        }
+
+        const username = String(dbSource.username || '').trim();
+        if (username && !/^[A-Za-z0-9_.@\\-]+$/.test(username)) {
+            throw new Error(`Invalid ${dbSource.type} username`);
+        }
+
+        const authDb = String(dbSource.authentication_database || 'admin').trim();
+        if (dbSource.type === 'mongodb' && authDb && !/^[A-Za-z0-9_.-]+$/.test(authDb)) {
+            throw new Error('Invalid mongodb authentication database name');
+        }
+
+        return { dbName, host, user: username, port: rawPort, authDb };
+    }
+
+    _shellSingleQuote(value) {
+        return `'${String(value ?? '').replace(/'/g, `'\"'\"'`)}'`;
+    }
+
     _extractMssqlSourcesFromHooks(config) {
         const sources = [];
         const hooks = [];
@@ -105,6 +147,50 @@ class BackupManager {
                 }
             } catch (e) {
                 // Ignore malformed metadata markers from older/broken configs.
+            }
+        }
+
+        return sources;
+    }
+
+    _extractDbDumpSourcesFromHooks(config) {
+        const sources = [];
+        const hooks = [];
+        if (Array.isArray(config.commands)) {
+            for (const commandHook of config.commands) {
+                if (!commandHook || !Array.isArray(commandHook.run)) continue;
+                hooks.push(...commandHook.run);
+            }
+        }
+        const marker = 'BORGMATIC_UI_DB_META_B64:';
+
+        for (const hook of hooks) {
+            if (typeof hook !== 'string' || !hook.includes(marker)) continue;
+            try {
+                const line = hook.split('\n').find((l) => l.includes(marker));
+                if (!line) continue;
+                const encoded = line.substring(line.indexOf(marker) + marker.length).trim();
+                const parsed = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
+                if (parsed?.type && ['mariadb', 'mysql', 'postgresql', 'mongodb'].includes(parsed.type)) {
+                    const envVar = parsed.db_password_env_var;
+                    const placeholder = typeof envVar === 'string' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(envVar)
+                        ? '${' + envVar + '}'
+                        : undefined;
+                    sources.push({
+                        type: parsed.type,
+                        database_name: parsed.database_name,
+                        hostname: parsed.hostname,
+                        port: parsed.port,
+                        username: parsed.username,
+                        tls: parsed.tls,
+                        authentication_database: parsed.authentication_database,
+                        is_host_database: !!parsed.is_host_database,
+                        dump_method: 'local',
+                        password: placeholder,
+                    });
+                }
+            } catch (e) {
+                // Ignore malformed metadata
             }
         }
 
@@ -1125,77 +1211,107 @@ class BackupManager {
         if (dbSource.format) dbConfig.format = dbSource.format;
         if (dbSource.compression) dbConfig.compression = dbSource.compression;
 
-        switch (dbSource.type) {
-            case 'postgresql':
-                config.postgresql_databases = config.postgresql_databases || [];
-                config.postgresql_databases.push(dbConfig);
-                break;
-            case 'mysql':
-                config.mysql_databases = config.mysql_databases || [];
-                // Add TLS option - default to false for compatibility with containers without SSL
-                dbConfig.tls = dbSource.tls !== undefined ? dbSource.tls : false;
-                config.mysql_databases.push(dbConfig);
-                break;
-            case 'mariadb':
-                config.mariadb_databases = config.mariadb_databases || [];
-                // Add TLS option - default to false for compatibility with containers without SSL
-                dbConfig.tls = dbSource.tls !== undefined ? dbSource.tls : false;
-                config.mariadb_databases.push(dbConfig);
-                break;
-            case 'mongodb':
-                config.mongodb_databases = config.mongodb_databases || [];
-                config.mongodb_databases.push(dbConfig);
-                break;
-            case 'sqlite':
-                // SQLite requires a valid path - skip if missing
-                if (!dbSource.path) {
-                    console.warn(`Skipping SQLite database "${dbSource.database_name}" - missing path`);
+        const dumpMethod = dbSource.dump_method || 'local';
+        const useNativeHook = dumpMethod === 'native';
+        const hookEligible = ['mariadb', 'mysql', 'postgresql', 'mongodb'].includes(dbSource.type);
+
+        if (hookEligible && useNativeHook) {
+            // Experimental: use borgmatic's native FIFO/streaming mechanism
+            switch (dbSource.type) {
+                case 'postgresql':
+                    config.postgresql_databases = config.postgresql_databases || [];
+                    config.postgresql_databases.push(dbConfig);
+                    break;
+                case 'mysql':
+                    config.mysql_databases = config.mysql_databases || [];
+                    dbConfig.tls = dbSource.tls !== undefined ? dbSource.tls : false;
+                    config.mysql_databases.push(dbConfig);
+                    break;
+                case 'mariadb':
+                    config.mariadb_databases = config.mariadb_databases || [];
+                    dbConfig.tls = dbSource.tls !== undefined ? dbSource.tls : false;
+                    config.mariadb_databases.push(dbConfig);
+                    break;
+                case 'mongodb':
+                    config.mongodb_databases = config.mongodb_databases || [];
+                    config.mongodb_databases.push(dbConfig);
+                    break;
+            }
+        } else if (hookEligible && !useNativeHook) {
+            // Default: dump to temp directory via command hooks (reliable with all repo types)
+            const safeBackup = String(backupId || 'unknown').replace(/[^A-Za-z0-9_]/g, '_');
+            const tempDir = `/tmp/borgmatic_db_dumps_${safeBackup}_${dbSource.type}_${dbIndex}`;
+            const passEnvVar = (typeof passwordValue === 'string' && passwordValue.startsWith('${'))
+                ? passwordValue.slice(2, -1)
+                : null;
+
+            config.source_directories = config.source_directories || [];
+            if (!config.source_directories.includes(tempDir)) {
+                config.source_directories.push(tempDir);
+            }
+
+            this._appendCommandHook(config, {
+                before: 'action',
+                when: ['create'],
+                run: [this.generateDbDumpScript(dbSource, passEnvVar, tempDir)],
+            });
+
+            const cleanupCmd = `rm -rf "${tempDir}"`;
+            const hasCleanup = Array.isArray(config.commands) && config.commands.some(
+                (hook) => Array.isArray(hook?.run) && hook.run.includes(cleanupCmd)
+            );
+            if (!hasCleanup) {
+                this._appendCommandHook(config, {
+                    after: 'action',
+                    when: ['create'],
+                    run: [cleanupCmd],
+                });
+            }
+        } else {
+            switch (dbSource.type) {
+                case 'sqlite':
+                    if (!dbSource.path) {
+                        console.warn(`Skipping SQLite database "${dbSource.database_name}" - missing path`);
+                        break;
+                    }
+                    config.sqlite_databases = config.sqlite_databases || [];
+                    config.sqlite_databases.push({
+                        name: dbSource.database_name,
+                        path: dbSource.path
+                    });
+                    break;
+                case 'mssql': {
+                    const safeBackup = String(backupId || 'unknown').replace(/[^A-Za-z0-9_]/g, '_');
+                    const mssqlTempDir = `/tmp/borgmatic_mssql_dumps_${safeBackup}_${dbIndex}`;
+                    const mssqlPassEnvVar = (typeof passwordValue === 'string' && passwordValue.startsWith('${'))
+                        ? passwordValue.slice(2, -1)
+                        : null;
+
+                    config.source_directories = config.source_directories || [];
+                    if (!config.source_directories.includes(mssqlTempDir)) {
+                        config.source_directories.push(mssqlTempDir);
+                    }
+
+                    this._appendCommandHook(config, {
+                        before: 'action',
+                        when: ['create'],
+                        run: [this.generateMssqlDumpScript(dbSource, mssqlPassEnvVar, mssqlTempDir)],
+                    });
+
+                    const cleanupCmd = `rm -rf "${mssqlTempDir}"`;
+                    const hasCleanup = Array.isArray(config.commands) && config.commands.some(
+                        (hook) => Array.isArray(hook?.run) && hook.run.includes(cleanupCmd)
+                    );
+                    if (!hasCleanup) {
+                        this._appendCommandHook(config, {
+                            after: 'action',
+                            when: ['create'],
+                            run: [cleanupCmd],
+                        });
+                    }
                     break;
                 }
-                config.sqlite_databases = config.sqlite_databases || [];
-                // SQLite doesn't need any network connection - it works with file paths
-                // The path should be accessible from the borgmatic container
-                config.sqlite_databases.push({
-                    name: dbSource.database_name,
-                    path: dbSource.path
-                });
-                break;
-            case 'mssql':
-                // MSSQL uses sqlcmd via hooks since borgmatic has no native MSSQL support
-                // We dump to a temp folder, include it in sources, and clean up after backup
-                const safeBackup = String(backupId || 'unknown').replace(/[^A-Za-z0-9_]/g, '_');
-                const mssqlTempDir = `/tmp/borgmatic_mssql_dumps_${safeBackup}_${dbIndex}`;
-                const mssqlPassEnvVar = (typeof passwordValue === 'string' && passwordValue.startsWith('${'))
-                    ? passwordValue.slice(2, -1)  // Extract env var name from ${VAR}
-                    : null;
-                
-                // Add temp folder to sources if not already present
-                config.source_directories = config.source_directories || [];
-                if (!config.source_directories.includes(mssqlTempDir)) {
-                    config.source_directories.push(mssqlTempDir);
-                }
-                
-                // Generate pre-create action hook via borgmatic 2.x "commands:" format
-                this._appendCommandHook(config, {
-                    before: 'action',
-                    when: ['create'],
-                    run: [this.generateMssqlDumpScript(dbSource, mssqlPassEnvVar, mssqlTempDir)],
-                });
-                
-                // Generate post-create action hook for cleanup
-                // Only add cleanup once (check if already present)
-                const cleanupCmd = `rm -rf "${mssqlTempDir}"`;
-                const hasCleanup = Array.isArray(config.commands) && config.commands.some(
-                    (hook) => Array.isArray(hook?.run) && hook.run.includes(cleanupCmd)
-                );
-                if (!hasCleanup) {
-                    this._appendCommandHook(config, {
-                        after: 'action',
-                        when: ['create'],
-                        run: [cleanupCmd],
-                    });
-                }
-                break;
+            }
         }
         
         // Return the password storage promise (or null) so caller can await it
@@ -1307,6 +1423,131 @@ echo "Exporting MSSQL database: ${validated.dbName}"
     }
 
     /**
+     * Generate a database dump script for MariaDB, MySQL, PostgreSQL, or MongoDB.
+     * Dumps to a temp directory which gets included in source_directories.
+     * This avoids borgmatic's internal FIFO/streaming mechanism which has JSON
+     * parsing bugs with SSH warnings from remote repositories.
+     */
+    generateDbDumpScript(dbSource, passEnvVar, tempDir) {
+        const validated = this._validateHookDbInputs(dbSource);
+        const hostname = validated.host;
+        const port = validated.port;
+        const username = validated.user;
+        const dbName = validated.dbName;
+        const authDb = validated.authDb;
+        const hasEnvVar = typeof passEnvVar === 'string' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(passEnvVar);
+        const passwordLiteral = hasEnvVar ? '' : String(dbSource.password || '');
+
+        const metadata = {
+            type: dbSource.type,
+            database_name: dbName,
+            hostname,
+            port,
+            username,
+            tls: dbSource.tls,
+            authentication_database: dbSource.authentication_database,
+            is_host_database: !!dbSource.is_host_database,
+            db_password_env_var: hasEnvVar ? passEnvVar : null,
+        };
+        const metadataB64 = Buffer.from(JSON.stringify(metadata), 'utf8').toString('base64');
+        const metadataComment = `# BORGMATIC_UI_DB_META_B64:${metadataB64}`;
+        const dbPassLine = hasEnvVar
+            ? `DB_PASS="\${${passEnvVar}:-}"`
+            : `DB_PASS=${this._shellSingleQuote(passwordLiteral)}`;
+        const hostQ = this._shellSingleQuote(hostname);
+        const userQ = this._shellSingleQuote(username);
+        const dbNameQ = this._shellSingleQuote(dbName);
+        const authDbQ = this._shellSingleQuote(authDb);
+        const tempDirQ = this._shellSingleQuote(tempDir);
+
+        switch (dbSource.type) {
+            case 'mariadb':
+            case 'mysql': {
+                const dumpCmd = dbSource.type === 'mariadb' ? 'mariadb-dump' : 'mysqldump';
+                const tlsFlag = dbSource.tls === false ? ' --skip-ssl' : '';
+                if (dbName === 'all') {
+                    return `#!/bin/sh
+${metadataComment}
+set -eu
+${dbPassLine}
+mkdir -p ${tempDirQ}
+echo "Dumping all ${dbSource.type} databases from ${hostname}:${port}..."
+MYSQL_PWD="$DB_PASS" ${dumpCmd} -h ${hostQ} -P ${port} -u ${userQ} --single-transaction --all-databases${tlsFlag} > ${tempDirQ}/all-databases.sql
+echo "Database dump completed: ${tempDir}/all-databases.sql"`;
+                }
+                return `#!/bin/sh
+${metadataComment}
+set -eu
+${dbPassLine}
+mkdir -p ${tempDirQ}
+echo "Dumping ${dbSource.type} database '${dbName}' from ${hostname}:${port}..."
+MYSQL_PWD="$DB_PASS" ${dumpCmd} -h ${hostQ} -P ${port} -u ${userQ} --single-transaction --databases ${dbNameQ}${tlsFlag} > ${tempDirQ}/${dbNameQ}.sql
+echo "Database dump completed: ${tempDir}/${dbName}.sql"`;
+            }
+
+            case 'postgresql': {
+                const pgpassLineQ = this._shellSingleQuote(`${hostname}:${port}:*:${username}:`);
+                if (dbName === 'all') {
+                    return `#!/bin/sh
+${metadataComment}
+set -eu
+${dbPassLine}
+mkdir -p ${tempDirQ}
+export PGPASSFILE="$(mktemp)"
+trap 'rm -f "$PGPASSFILE"' EXIT
+printf "%s%s\\n" ${pgpassLineQ} "$DB_PASS" > "$PGPASSFILE"
+chmod 600 "$PGPASSFILE"
+echo "Dumping all PostgreSQL databases from ${hostname}:${port}..."
+pg_dumpall -h ${hostQ} -p ${port} -U ${userQ} -f ${tempDirQ}/all-databases.sql
+echo "Database dump completed: ${tempDir}/all-databases.sql"`;
+                }
+                return `#!/bin/sh
+${metadataComment}
+set -eu
+${dbPassLine}
+mkdir -p ${tempDirQ}
+export PGPASSFILE="$(mktemp)"
+trap 'rm -f "$PGPASSFILE"' EXIT
+printf "%s%s\\n" ${pgpassLineQ} "$DB_PASS" > "$PGPASSFILE"
+chmod 600 "$PGPASSFILE"
+echo "Dumping PostgreSQL database '${dbName}' from ${hostname}:${port}..."
+pg_dump -h ${hostQ} -p ${port} -U ${userQ} -d ${dbNameQ} -Fc -f ${tempDirQ}/${dbNameQ}.dump
+echo "Database dump completed: ${tempDir}/${dbName}.dump"`;
+            }
+
+            case 'mongodb': {
+                const authPart = username ? ` --username=${userQ} --password="$DB_PASS" --authenticationDatabase=${authDbQ}` : '';
+                if (dbName === 'all') {
+                    return `#!/bin/sh
+${metadataComment}
+set -eu
+${dbPassLine}
+mkdir -p ${tempDirQ}
+echo "Dumping all MongoDB databases from ${hostname}:${port}..."
+mongodump --host=${hostQ} --port=${port}${authPart} --archive=${tempDirQ}/all-databases.archive
+echo "Database dump completed: ${tempDir}/all-databases.archive"`;
+                }
+                return `#!/bin/sh
+${metadataComment}
+set -eu
+${dbPassLine}
+mkdir -p ${tempDirQ}
+echo "Dumping MongoDB database '${dbName}' from ${hostname}:${port}..."
+mongodump --host=${hostQ} --port=${port} --db=${dbNameQ}${authPart} --archive=${tempDirQ}/${dbNameQ}.archive
+echo "Database dump completed: ${tempDir}/${dbName}.archive"`;
+            }
+
+            default:
+                throw new Error(`Unsupported database type for dump script: ${dbSource.type}`);
+        }
+    }
+
+    _getDefaultPort(dbType) {
+        const defaults = { postgresql: 5432, mysql: 3306, mariadb: 3306, mongodb: 27017, mssql: 1433 };
+        return defaults[dbType] || 5432;
+    }
+
+    /**
      * Build checks configuration
      */
     buildChecksConfig(frequency) {
@@ -1332,11 +1573,11 @@ echo "Exporting MSSQL database: ${validated.dbName}"
         // Extract local sources (handle both old and new format)
         const sourceDirs = config.source_directories || config.location?.source_directories || [];
         for (const dir of sourceDirs) {
-            if (this._isMssqlTempPath(dir)) continue;
+            if (this._isDumpTempPath(dir)) continue;
             sources.push({ type: 'local', path: dir });
         }
         
-        // Extract PostgreSQL databases
+        // Extract PostgreSQL databases (native borgmatic hooks)
         if (config.postgresql_databases) {
             for (const db of config.postgresql_databases) {
                 sources.push({
@@ -1345,12 +1586,13 @@ echo "Exporting MSSQL database: ${validated.dbName}"
                     hostname: db.hostname,
                     port: db.port,
                     username: db.username,
-                    password: db.password
+                    password: db.password,
+                    dump_method: 'native',
                 });
             }
         }
         
-        // Extract MySQL databases
+        // Extract MySQL databases (native borgmatic hooks)
         if (config.mysql_databases) {
             for (const db of config.mysql_databases) {
                 sources.push({
@@ -1360,12 +1602,13 @@ echo "Exporting MSSQL database: ${validated.dbName}"
                     port: db.port,
                     username: db.username,
                     password: db.password,
-                    tls: db.tls
+                    tls: db.tls,
+                    dump_method: 'native',
                 });
             }
         }
         
-        // Extract MariaDB databases
+        // Extract MariaDB databases (native borgmatic hooks)
         if (config.mariadb_databases) {
             for (const db of config.mariadb_databases) {
                 sources.push({
@@ -1375,12 +1618,13 @@ echo "Exporting MSSQL database: ${validated.dbName}"
                     port: db.port,
                     username: db.username,
                     password: db.password,
-                    tls: db.tls
+                    tls: db.tls,
+                    dump_method: 'native',
                 });
             }
         }
         
-        // Extract MongoDB databases
+        // Extract MongoDB databases (native borgmatic hooks)
         if (config.mongodb_databases) {
             for (const db of config.mongodb_databases) {
                 sources.push({
@@ -1390,7 +1634,8 @@ echo "Exporting MSSQL database: ${validated.dbName}"
                     port: db.port,
                     username: db.username,
                     password: db.password,
-                    authentication_database: db.authentication_database
+                    authentication_database: db.authentication_database,
+                    dump_method: 'native',
                 });
             }
         }
@@ -1406,8 +1651,11 @@ echo "Exporting MSSQL database: ${validated.dbName}"
             }
         }
 
-        // Extract MSSQL databases from generated before_backup hook metadata markers
+        // Extract MSSQL databases from generated hook metadata markers
         sources.push(...this._extractMssqlSourcesFromHooks(config));
+
+        // Extract MariaDB/MySQL/PostgreSQL/MongoDB from command-hook dump scripts
+        sources.push(...this._extractDbDumpSourcesFromHooks(config));
         
         return sources;
     }
@@ -1559,36 +1807,51 @@ ${metadata.schedule_id ? `# Schedule ID: ${metadata.schedule_id}\n` : ''}
         sources.push(...sourceDirs.map(dir => ({
             type: 'local',
             path: dir
-        })).filter((s) => !this._isMssqlTempPath(s.path)));
+        })).filter((s) => !this._isDumpTempPath(s.path)));
 
-        // Databases - return format compatible with both card display and wizard editing
+        // Native borgmatic database hooks (FIFO/streaming) - dump_method: 'native'
         ['postgresql', 'mysql', 'mariadb', 'mongodb', 'sqlite'].forEach(dbType => {
             const dbKey = `${dbType}_databases`;
             if (config[dbKey]) {
                 config[dbKey].forEach(db => {
-                    // Detect if it's a host database
                     const isHostDatabase = db.hostname === 'host.docker.internal';
                     const connection_type = dbType === 'sqlite' ? 'file' : (isHostDatabase ? 'host' : 'network');
                     
                     sources.push({
-                        type: dbType,  // Used by wizard
-                        database_type: dbType,  // Used by card display
-                        database_name: db.name,  // Used by card display
+                        type: dbType,
+                        database_type: dbType,
+                        database_name: db.name,
                         hostname: db.hostname,
                         port: db.port,
                         username: db.username,
-                        // Never return passwords/placeholders to the frontend.
                         password: undefined,
                         tls: db.tls,
-                        path: db.path,  // For SQLite
-                        is_host_database: isHostDatabase,  // True if connecting via host.docker.internal
-                        connection_type
+                        path: db.path,
+                        is_host_database: isHostDatabase,
+                        connection_type,
+                        dump_method: dbType === 'sqlite' ? undefined : 'native',
                     });
                 });
             }
         });
 
-        // MSSQL is hook-based, so load from metadata marker embedded in before_backup hooks
+        // Hook-based DB dumps (dump-to-file) - dump_method: 'local'
+        const dbDumpSources = this._extractDbDumpSourcesFromHooks(config).map((db) => ({
+            type: db.type,
+            database_type: db.type,
+            database_name: db.database_name,
+            hostname: db.hostname,
+            port: db.port,
+            username: db.username,
+            password: undefined,
+            tls: db.tls,
+            is_host_database: !!db.is_host_database,
+            connection_type: db.is_host_database ? 'host' : 'network',
+            dump_method: 'local',
+        }));
+        sources.push(...dbDumpSources);
+
+        // MSSQL is always hook-based
         const mssqlSources = this._extractMssqlSourcesFromHooks(config).map((db) => ({
             type: 'mssql',
             database_type: 'mssql',

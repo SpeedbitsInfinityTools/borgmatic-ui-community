@@ -357,15 +357,23 @@ router.post('/:id/duplicate', authenticateToken, requireAdmin, async (req, res) 
                 const runCommands = commandHook.run.filter(Boolean);
                 if (!runCommands.length) continue;
 
-                // Detect generated canary check hook and keep it as structured canary settings.
-                const canaryCommand = runCommands.find(cmd =>
-                    typeof cmd === 'string' &&
-                    cmd.includes('CANARY=') &&
-                    cmd.includes('/api/backups/canary-alert')
+                // Skip generated hooks that will be regenerated from sources:
+                // canary check, MSSQL dump scripts, DB dump scripts, and their cleanup commands
+                const isGenerated = runCommands.some(cmd =>
+                    typeof cmd === 'string' && (
+                        (cmd.includes('CANARY=') && cmd.includes('/api/backups/canary-alert')) ||
+                        cmd.includes('BORGMATIC_UI_MSSQL_META_B64:') ||
+                        cmd.includes('BORGMATIC_UI_DB_META_B64:') ||
+                        /^rm -rf "\/tmp\/borgmatic_(mssql_dumps|db_dumps)_[^"]+"$/.test(cmd)
+                    )
                 );
-                if (canaryCommand) {
-                    const match = canaryCommand.match(/CANARY="([^"]+)"/);
-                    if (match?.[1]) canaryFilePath = match[1];
+                if (isGenerated) {
+                    // Extract canary path if present
+                    const canaryCmd = runCommands.find(c => typeof c === 'string' && c.includes('CANARY=') && c.includes('/api/backups/canary-alert'));
+                    if (canaryCmd) {
+                        const match = canaryCmd.match(/CANARY="([^"]+)"/);
+                        if (match?.[1]) canaryFilePath = match[1];
+                    }
                     continue;
                 }
 
