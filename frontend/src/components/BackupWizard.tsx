@@ -673,6 +673,17 @@ const BackupWizard: React.FC<BackupWizardProps> = ({
     setFormData({ ...formData, sources: newSources });
   };
 
+  const getMssqlAuthHint = (source: any) => {
+    const method = source?.auth_method || 'sql';
+    if (method === 'service_principal') {
+      return 'Tip: Service Principal requires Client ID + Tenant ID, and Password must contain the Client Secret.';
+    }
+    if (method === 'ad_password') {
+      return 'Tip: Azure AD Password requires Username (UPN, e.g. user@domain.tld) and Password.';
+    }
+    return 'Tip: SQL Authentication uses a SQL login in Username and its SQL password in Password.';
+  };
+
   // Browse databases on a server
   const browseDatabases = async (sourceIndex: number) => {
     const source = formData.sources[sourceIndex];
@@ -700,6 +711,9 @@ const BackupWizard: React.FC<BackupWizardProps> = ({
         instance: source.instance,
         encrypt: source.encrypt,
         trustServerCert: source.trustServerCert,
+        auth_method: source.auth_method,
+        client_id: source.client_id,
+        tenant_id: source.tenant_id,
       });
 
       if (response.data?.success) {
@@ -712,10 +726,12 @@ const BackupWizard: React.FC<BackupWizardProps> = ({
         throw new Error(response.data?.detail || 'Failed to list databases');
       }
     } catch (error: any) {
+      const baseError = error.response?.data?.detail || error.message || 'Failed to connect to database server';
+      const authHint = source?.type === 'mssql' ? ` ${getMssqlAuthHint(source)}` : '';
       setDbBrowserState(prev => ({
         ...prev,
         isLoading: false,
-        error: error.response?.data?.detail || error.message || 'Failed to connect to database server',
+        error: `${baseError}${authHint}`,
       }));
     }
   };
@@ -740,6 +756,9 @@ const BackupWizard: React.FC<BackupWizardProps> = ({
         instance: source.instance,
         encrypt: source.encrypt,
         trustServerCert: source.trustServerCert,
+        auth_method: source.auth_method,
+        client_id: source.client_id,
+        tenant_id: source.tenant_id,
       });
 
       if (response.data?.success && response.data?.data?.connected) {
@@ -748,7 +767,8 @@ const BackupWizard: React.FC<BackupWizardProps> = ({
         throw new Error(response.data?.detail || 'Connection test failed');
       }
     } catch (error: any) {
-      toast.error(error.response?.data?.detail || error.message || 'Failed to connect to MSSQL server');
+      const baseError = error.response?.data?.detail || error.message || 'Failed to connect to MSSQL server';
+      toast.error(`${baseError} ${getMssqlAuthHint(source)}`);
     } finally {
       setTestingDbConnectionIndex(null);
     }
@@ -1137,18 +1157,50 @@ const BackupWizard: React.FC<BackupWizardProps> = ({
               </div>
 
               {/* Database connection help - show when there are database sources */}
-              {formData.sources.some(s => ['postgresql', 'mysql', 'mariadb', 'mongodb', 'sqlite'].includes(s.type)) && (
-                <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm">
-                  <p className="font-medium text-blue-800 mb-2">Database Connection Options:</p>
-                  <ul className="text-blue-700 space-y-1 text-xs">
-                    <li><strong>localhost</strong> — Database running in the same container as Borgmatic</li>
-                    <li><strong>Container name</strong> (e.g., <code className="bg-blue-100 px-1 rounded">postgres-db</code>) — Database in another Docker container on the same network</li>
-                    <li><strong>host.docker.internal</strong> — Database running on your host machine (outside Docker)</li>
-                    <li><strong>IP address or hostname</strong> — Remote database server on your network</li>
+              {formData.sources.some(s => ['postgresql', 'mysql', 'mariadb', 'mongodb', 'sqlite', 'mssql'].includes(s.type)) && (
+                <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-700 overflow-y-auto" style={{ maxHeight: '155px' }}>
+                  <p className="font-medium text-blue-800 mb-2 text-sm">Database Connection Help</p>
+
+                  <p className="font-semibold text-blue-800 mb-1">Hostname / Connection</p>
+                  <ul className="space-y-0.5 mb-2">
+                    <li><strong>localhost</strong> — Database in the same container as Borgmatic</li>
+                    <li><strong>Container name</strong> (e.g. <code className="bg-blue-100 px-1 rounded">postgres-db</code>) — Another Docker container on the same network</li>
+                    <li><strong>host.docker.internal</strong> — Database on your host machine (outside Docker)</li>
+                    <li><strong>IP / hostname</strong> — Remote server (e.g. <code className="bg-blue-100 px-1 rounded">db.example.com</code> or Azure SQL <code className="bg-blue-100 px-1 rounded">*.database.windows.net</code>)</li>
                   </ul>
-                  <p className="text-blue-600 mt-2 text-xs">
-                    <strong>Tip:</strong> Use "All" to backup every database on the server, or "Browse" to select specific ones.
-                  </p>
+
+                  <p className="font-semibold text-blue-800 mb-1">Database Name</p>
+                  <p className="mb-2">Enter a specific database name, or click <strong>"All"</strong> to back up every database on the server. Use <strong>"Browse"</strong> to list and pick from available databases.</p>
+
+                  {formData.sources.some(s => s.type === 'mssql') && (
+                    <>
+                      <p className="font-semibold text-blue-800 mb-1">MS SQL — Authentication</p>
+                      <ul className="space-y-0.5 mb-2">
+                        <li><strong>SQL Authentication</strong> — Classic SQL login (e.g. <code className="bg-blue-100 px-1 rounded">sa</code>) with username + password.</li>
+                        <li><strong>Azure AD Password</strong> — Entra ID user. Enter UPN (e.g. <code className="bg-blue-100 px-1 rounded">user@company.com</code>) as Username.</li>
+                        <li><strong>Service Principal</strong> — For automated backups. Fill in Client ID + Tenant ID; put the Client Secret in Password.</li>
+                      </ul>
+
+                      <p className="font-semibold text-blue-800 mb-1">MS SQL — Connection Options</p>
+                      <ul className="space-y-0.5 mb-2">
+                        <li><strong>Instance</strong> — Only for on-premise named instances (e.g. <code className="bg-blue-100 px-1 rounded">SQLEXPRESS</code>). Leave empty for Azure SQL and single-instance setups.</li>
+                        <li><strong>Encrypt: Yes</strong> (default) — TLS encryption, required by Azure SQL. Use <strong>No</strong> only on trusted local networks. <strong>Strict</strong> requires SQL Server 2022+ or Azure.</li>
+                        <li><strong>Trust Cert</strong> — Accept self-signed certificates. Check for on-premise servers; Azure SQL uses publicly trusted certs so unchecking works there too.</li>
+                      </ul>
+                    </>
+                  )}
+
+                  {formData.sources.some(s => ['mariadb', 'mysql', 'postgresql', 'mongodb'].includes(s.type)) && (
+                    <>
+                      <p className="font-semibold text-blue-800 mb-1">Dump Method</p>
+                      <ul className="space-y-0.5 mb-2">
+                        <li><strong>Dump locally</strong> (default) — Runs the DB client tool to create a dump file, then backs it up. Reliable with all repository types.</li>
+                        <li><strong>Borgmatic streaming</strong> (experimental) — Pipes the dump directly into the archive. Saves disk space but may fail with remote SSH repos.</li>
+                      </ul>
+                    </>
+                  )}
+
+                  <p className="text-blue-500 mt-1"><strong>Tip:</strong> Use "Test" (MSSQL) or "Browse" to verify your connection before saving.</p>
                 </div>
               )}
 
@@ -1309,6 +1361,11 @@ const BackupWizard: React.FC<BackupWizardProps> = ({
                           </button>
                         </div>
                         <div className="flex items-center gap-2 pl-7">
+                          {source.type === 'mssql' && source.auth_method === 'service_principal' ? (
+                            <div className="w-56 px-2 py-1 text-xs text-gray-500 border border-dashed border-gray-300 rounded bg-gray-50">
+                              Username is not used in Service Principal mode
+                            </div>
+                          ) : (
                           <input
                             type="text"
                             value={source.username || ''}
@@ -1316,12 +1373,13 @@ const BackupWizard: React.FC<BackupWizardProps> = ({
                             className="w-56 px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                             placeholder="Username"
                           />
+                          )}
                           <input
                             type="password"
                             value={source.password || ''}
                             onChange={(e) => updateSource(index, 'password', e.target.value)}
                             className="w-56 px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                            placeholder="Password"
+                            placeholder={source.type === 'mssql' && source.auth_method === 'service_principal' ? 'Client Secret' : 'Password'}
                           />
                           {source.discovered && (
                             <span className="text-xs text-green-600 bg-green-50 px-2 py-0.5 rounded">
@@ -1331,35 +1389,67 @@ const BackupWizard: React.FC<BackupWizardProps> = ({
                         </div>
                         {/* MSSQL-specific options */}
                         {source.type === 'mssql' && (
-                          <div className="flex items-center gap-2 pl-7 mt-2">
-                            <input
-                              type="text"
-                              value={source.instance || ''}
-                              onChange={(e) => updateSource(index, 'instance', e.target.value)}
-                              className="w-32 px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                              placeholder="Instance (optional)"
-                              title="Named instance (e.g., SQLEXPRESS)"
-                            />
-                            <label className="flex items-center gap-1 text-sm text-gray-600">
+                          <>
+                            <div className="flex items-center gap-2 pl-7 mt-2 flex-wrap">
+                              <select
+                                value={source.auth_method || 'sql'}
+                                onChange={(e) => updateSource(index, 'auth_method', e.target.value)}
+                                className="px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                title="Authentication method"
+                              >
+                                <option value="sql">SQL Authentication</option>
+                                <option value="ad_password">Azure AD Password</option>
+                                <option value="service_principal">Service Principal</option>
+                              </select>
                               <input
-                                type="checkbox"
-                                checked={source.trustServerCert || false}
-                                onChange={(e) => updateSource(index, 'trustServerCert', e.target.checked)}
-                                className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                                type="text"
+                                value={source.instance || ''}
+                                onChange={(e) => updateSource(index, 'instance', e.target.value)}
+                                className="w-32 px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                placeholder="Instance (optional)"
+                                title="Named instance (e.g., SQLEXPRESS)"
                               />
-                              Trust Cert
-                            </label>
-                            <select
-                              value={source.encrypt || 'true'}
-                              onChange={(e) => updateSource(index, 'encrypt', e.target.value)}
-                              className="px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                              title="Connection encryption mode"
-                            >
-                              <option value="true">Encrypt: Yes</option>
-                              <option value="false">Encrypt: No</option>
-                              <option value="strict">Encrypt: Strict</option>
-                            </select>
-                          </div>
+                              <select
+                                value={source.encrypt || 'true'}
+                                onChange={(e) => updateSource(index, 'encrypt', e.target.value)}
+                                className="px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                title="Connection encryption mode"
+                              >
+                                <option value="true">Encrypt: Yes</option>
+                                <option value="false">Encrypt: No</option>
+                                <option value="strict">Encrypt: Strict</option>
+                              </select>
+                              <label className="flex items-center gap-1 text-sm text-gray-600">
+                                <input
+                                  type="checkbox"
+                                  checked={source.trustServerCert || false}
+                                  onChange={(e) => updateSource(index, 'trustServerCert', e.target.checked)}
+                                  className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                                />
+                                Trust Cert
+                              </label>
+                            </div>
+                            {source.auth_method === 'service_principal' && (
+                              <div className="flex items-center gap-2 pl-7 mt-2">
+                                <input
+                                  type="text"
+                                  value={source.client_id || ''}
+                                  onChange={(e) => updateSource(index, 'client_id', e.target.value)}
+                                  className="w-56 px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                  placeholder="Client ID (Application ID) *"
+                                  title="Azure AD Application (Client) ID"
+                                />
+                                <input
+                                  type="text"
+                                  value={source.tenant_id || ''}
+                                  onChange={(e) => updateSource(index, 'tenant_id', e.target.value)}
+                                  className="w-56 px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                  placeholder="Tenant ID *"
+                                  title="Azure AD Tenant ID"
+                                />
+                              </div>
+                            )}
+                          </>
                         )}
                         {/* Dump method selector for supported DB types */}
                         {['mariadb', 'mysql', 'postgresql', 'mongodb'].includes(source.type) && (

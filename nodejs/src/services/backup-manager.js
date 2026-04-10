@@ -33,6 +33,7 @@ class BackupManager {
         const hostRegex = /^[A-Za-z0-9.-]+$/;
         const userRegex = /^[A-Za-z0-9_.@\\-]+$/;
         const instanceRegex = /^[A-Za-z0-9_-]+$/;
+        const guidRegex = /^[A-Za-z0-9-]+$/;
 
         const dbName = String(dbSource.database_name || '').trim();
         if (!dbName) throw new Error('MSSQL database name is required');
@@ -65,7 +66,25 @@ class BackupManager {
             throw new Error('Invalid MSSQL encrypt mode');
         }
 
-        return { dbName, host, user, port: rawPort, instance, encrypt };
+        const auth_method = dbSource.auth_method || 'sql';
+        if (!['sql', 'ad_password', 'service_principal'].includes(auth_method)) {
+            throw new Error('Invalid MSSQL auth method');
+        }
+
+        let client_id = '';
+        let tenant_id = '';
+        if (auth_method === 'service_principal') {
+            client_id = String(dbSource.client_id || '').trim();
+            if (!client_id || !guidRegex.test(client_id)) {
+                throw new Error('Service Principal requires a valid Client ID (Application ID)');
+            }
+            tenant_id = String(dbSource.tenant_id || '').trim();
+            if (!tenant_id || !guidRegex.test(tenant_id)) {
+                throw new Error('Service Principal requires a valid Tenant ID');
+            }
+        }
+
+        return { dbName, host, user, port: rawPort, instance, encrypt, auth_method, client_id, tenant_id };
     }
 
     _validateHookDbInputs(dbSource) {
@@ -132,7 +151,7 @@ class BackupManager {
                 const encoded = line.substring(line.indexOf(marker) + marker.length).trim();
                 const parsed = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
                 if (parsed?.type === 'mssql') {
-                    sources.push({
+                    const src = {
                         type: 'mssql',
                         database_name: parsed.database_name,
                         hostname: parsed.hostname,
@@ -143,7 +162,11 @@ class BackupManager {
                         trustServerCert: !!parsed.trustServerCert,
                         is_host_database: !!parsed.is_host_database,
                         password: undefined,
-                    });
+                        auth_method: parsed.auth_method || 'sql',
+                    };
+                    if (parsed.client_id) src.client_id = parsed.client_id;
+                    if (parsed.tenant_id) src.tenant_id = parsed.tenant_id;
+                    sources.push(src);
                 }
             } catch (e) {
                 // Ignore malformed metadata markers from older/broken configs.
@@ -1337,9 +1360,9 @@ class BackupManager {
         const validated = this._validateMssqlInputs(dbSource);
         const hostname = validated.host;
         const port = validated.port;
+        const authMethod = validated.auth_method;
 
         // Build server string for sqlpackage: "host,port" or "host,port\instance"
-        // Note: sqlpackage uses single backslash for instance, but we need to escape in shell
         const serverName = validated.instance
             ? `${hostname},${port}\\\\${validated.instance}`
             : `${hostname},${port}`;
@@ -1350,7 +1373,6 @@ class BackupManager {
             : `${hostname},${port}`;
 
         // sqlpackage encryption parameters
-        // Maps: true -> True, false -> False, strict -> Strict
         const encryptValue = validated.encrypt === 'true' ? 'True' 
             : validated.encrypt === 'false' ? 'False' 
             : 'Strict';
@@ -1364,6 +1386,28 @@ class BackupManager {
         // Build password reference (use env var if available, otherwise direct value)
         const passwordRef = passEnvVar ? `\${${passEnvVar}}` : String(dbSource.password || '');
         const passwordRefQuoted = passEnvVar ? `"\${${passEnvVar}}"` : `"${String(dbSource.password || '')}"`;
+
+        // Build auth-specific sqlcmd args for database listing
+        let sqlcmdAuthArgs;
+        if (authMethod === 'ad_password') {
+            sqlcmdAuthArgs = `--authentication-method ActiveDirectoryPassword -U "${validated.user}" -P ${passwordRefQuoted}`;
+        } else if (authMethod === 'service_principal') {
+            sqlcmdAuthArgs = `--authentication-method ActiveDirectoryServicePrincipal -U "${validated.client_id}" -P ${passwordRefQuoted} --tenant-id "${validated.tenant_id}"`;
+        } else {
+            sqlcmdAuthArgs = `-U "${validated.user}" -P ${passwordRefQuoted}`;
+        }
+
+        // Build sqlpackage auth args: use /scs: (SourceConnectionString) for AD auth
+        let sqlpackageAuthArgs;
+        if (authMethod === 'ad_password') {
+            const connStr = `Server=tcp:${serverName};Authentication=Active Directory Password;User ID=${validated.user};Encrypt=${encryptValue};TrustServerCertificate=${trustCertValue}`;
+            sqlpackageAuthArgs = { useConnectionString: true, connStrTemplate: connStr };
+        } else if (authMethod === 'service_principal') {
+            const connStr = `Server=tcp:${serverName};Authentication=Active Directory Service Principal;User ID=${validated.client_id};Encrypt=${encryptValue};TrustServerCertificate=${trustCertValue}`;
+            sqlpackageAuthArgs = { useConnectionString: true, connStrTemplate: connStr };
+        } else {
+            sqlpackageAuthArgs = { useConnectionString: false };
+        }
 
         // Resolver for sqlcmd binary (used for listing databases)
         const sqlcmdResolver = `SQLCMD_BIN="$(command -v sqlcmd || true)"; if [ -z "$SQLCMD_BIN" ]; then if [ -x /opt/mssql-tools18/bin/sqlcmd ]; then SQLCMD_BIN=/opt/mssql-tools18/bin/sqlcmd; elif [ -x /opt/mssql-tools/bin/sqlcmd ]; then SQLCMD_BIN=/opt/mssql-tools/bin/sqlcmd; else echo "sqlcmd not found"; exit 1; fi; fi`;
@@ -1382,8 +1426,34 @@ class BackupManager {
             encrypt: validated.encrypt,
             trustServerCert: !!dbSource.trustServerCert,
             is_host_database: !!dbSource.is_host_database,
+            auth_method: authMethod,
+            client_id: validated.client_id || undefined,
+            tenant_id: validated.tenant_id || undefined,
         };
         const metadataB64 = Buffer.from(JSON.stringify(metadata), 'utf8').toString('base64');
+
+        // Helper: build sqlpackage export command for a database.
+        // dbNameQuoted is a shell-quoted reference (e.g. '"$db"' or '"MyDB"').
+        // dbNameRaw is unquoted (e.g. '$db' or 'MyDB') for embedding inside a connection string.
+        const buildSqlpackageCmd = (dbNameQuoted, dbNameRaw, targetFileRef) => {
+            if (sqlpackageAuthArgs.useConnectionString) {
+                return `"$SQLPACKAGE_BIN" /Action:Export \\
+        /scs:"${sqlpackageAuthArgs.connStrTemplate};Password=\\"$DB_PASS_ESC\\";Initial Catalog=${dbNameRaw}" \\
+        /TargetFile:${targetFileRef}`;
+            }
+            return `"$SQLPACKAGE_BIN" /Action:Export \\
+        /SourceServerName:"${serverName}" \\
+        /SourceDatabaseName:${dbNameQuoted} \\
+        /SourceUser:"${validated.user}" \\
+        /SourcePassword:"${passwordRef}" \\
+        /SourceTrustServerCertificate:${trustCertValue} \\
+        /SourceEncryptConnection:${encryptValue} \\
+        /TargetFile:${targetFileRef}`;
+        };
+
+        // DB_PASS assignment used in connection string templates
+        const dbPassLine = `DB_PASS="${passwordRef}"`;
+        const dbPassEscLine = `DB_PASS_ESC="$(printf '%s' "$DB_PASS" | sed 's/"/""/g')"`;
 
         // For "all" databases, query with sqlcmd then export each with sqlpackage
         if (validated.dbName === 'all') {
@@ -1391,25 +1461,20 @@ class BackupManager {
 # MSSQL export script - all user databases (using sqlpackage)
 set -eu
 # BORGMATIC_UI_MSSQL_META_B64:${metadataB64}
+${dbPassLine}
+${sqlpackageAuthArgs.useConnectionString ? dbPassEscLine : ''}
 ${sqlcmdResolver}
 ${sqlpackageResolver}
 mkdir -p "${tempDir}"
 echo "Listing MSSQL databases..."
-"$SQLCMD_BIN" -S "${sqlcmdServer}" -U "${validated.user}" -P ${passwordRefQuoted} ${sqlcmdEncryptFlag} ${sqlcmdTrustCert} -b -r 1 -h -1 -W -Q "SET NOCOUNT ON; SELECT name FROM sys.databases WHERE database_id > 4 AND state = 0 AND name NOT IN ('master','tempdb','model','msdb')" | while IFS= read -r db; do
+"$SQLCMD_BIN" -S "${sqlcmdServer}" ${sqlcmdAuthArgs} ${sqlcmdEncryptFlag} ${sqlcmdTrustCert} -b -r 1 -h -1 -W -Q "SET NOCOUNT ON; SELECT name FROM sys.databases WHERE database_id > 4 AND state = 0 AND name NOT IN ('master','tempdb','model','msdb')" | while IFS= read -r db; do
     [ -z "$db" ] && continue
     if ! printf '%s' "$db" | grep -Eq '^[A-Za-z0-9_-]+$'; then
         echo "Skipping MSSQL database with unsupported name: $db"
         continue
     fi
     echo "Exporting MSSQL database: $db"
-    "$SQLPACKAGE_BIN" /Action:Export \\
-        /SourceServerName:"${serverName}" \\
-        /SourceDatabaseName:"$db" \\
-        /SourceUser:"${validated.user}" \\
-        /SourcePassword:"${passwordRef}" \\
-        /SourceTrustServerCertificate:${trustCertValue} \\
-        /SourceEncryptConnection:${encryptValue} \\
-        /TargetFile:"${tempDir}/$db.bacpac"
+    ${buildSqlpackageCmd('"$db"', '$db', `"${tempDir}/$db.bacpac"`)}
 done`;
         }
 
@@ -1418,17 +1483,12 @@ done`;
 # MSSQL export script - single database: ${validated.dbName} (using sqlpackage)
 set -eu
 # BORGMATIC_UI_MSSQL_META_B64:${metadataB64}
+${dbPassLine}
+${sqlpackageAuthArgs.useConnectionString ? dbPassEscLine : ''}
 ${sqlpackageResolver}
 mkdir -p "${tempDir}"
 echo "Exporting MSSQL database: ${validated.dbName}"
-"$SQLPACKAGE_BIN" /Action:Export \\
-    /SourceServerName:"${serverName}" \\
-    /SourceDatabaseName:"${validated.dbName}" \\
-    /SourceUser:"${validated.user}" \\
-    /SourcePassword:"${passwordRef}" \\
-    /SourceTrustServerCertificate:${trustCertValue} \\
-    /SourceEncryptConnection:${encryptValue} \\
-    /TargetFile:"${tempDir}/${validated.dbName}.bacpac"`;
+${buildSqlpackageCmd(`"${validated.dbName}"`, validated.dbName, `"${tempDir}/${validated.dbName}.bacpac"`)}`;
     }
 
     /**
@@ -1861,20 +1921,26 @@ ${metadata.schedule_id ? `# Schedule ID: ${metadata.schedule_id}\n` : ''}
         sources.push(...dbDumpSources);
 
         // MSSQL is always hook-based
-        const mssqlSources = this._extractMssqlSourcesFromHooks(config).map((db) => ({
-            type: 'mssql',
-            database_type: 'mssql',
-            database_name: db.database_name,
-            hostname: db.hostname,
-            port: db.port,
-            username: db.username,
-            password: undefined,
-            instance: db.instance || '',
-            encrypt: db.encrypt || 'true',
-            trustServerCert: !!db.trustServerCert,
-            is_host_database: !!db.is_host_database,
-            connection_type: db.is_host_database ? 'host' : 'network',
-        }));
+        const mssqlSources = this._extractMssqlSourcesFromHooks(config).map((db) => {
+            const src = {
+                type: 'mssql',
+                database_type: 'mssql',
+                database_name: db.database_name,
+                hostname: db.hostname,
+                port: db.port,
+                username: db.username,
+                password: undefined,
+                instance: db.instance || '',
+                encrypt: db.encrypt || 'true',
+                trustServerCert: !!db.trustServerCert,
+                is_host_database: !!db.is_host_database,
+                connection_type: db.is_host_database ? 'host' : 'network',
+                auth_method: db.auth_method || 'sql',
+            };
+            if (db.client_id) src.client_id = db.client_id;
+            if (db.tenant_id) src.tenant_id = db.tenant_id;
+            return src;
+        });
         sources.push(...mssqlSources);
 
         return sources;

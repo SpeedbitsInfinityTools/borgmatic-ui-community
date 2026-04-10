@@ -4,6 +4,99 @@ const { authenticateToken, requireAdmin } = require('../middleware/auth');
 const databaseDiscovery = require('../services/database-discovery');
 
 /**
+ * Build sqlcmd args for MSSQL connections, handling SQL auth, Azure AD Password,
+ * and Service Principal authentication methods.
+ * @returns {{ args: string[], command: string }}
+ */
+function buildMssqlSqlcmdArgs({ hostname, port, username, password, container, instance, encrypt, trustServerCert, auth_method, client_id, tenant_id, query }) {
+    const connectHost = hostname || container || 'localhost';
+    const mssqlServer = instance
+        ? `${connectHost},${port || 1433}\\${instance}`
+        : `${connectHost},${port || 1433}`;
+    const requestedEncrypt = ['true', 'false', 'strict'].includes(String(encrypt)) ? String(encrypt) : 'true';
+    const encryptMode = requestedEncrypt === 'false' ? 'disable' : requestedEncrypt;
+    const useTrustServerCert = trustServerCert !== undefined ? !!trustServerCert : true;
+
+    const args = ['-S', mssqlServer];
+
+    const method = auth_method || 'sql';
+    if (method === 'ad_password') {
+        args.push('--authentication-method', 'ActiveDirectoryPassword');
+        args.push('-U', username || '');
+        args.push('-P', password || '');
+    } else if (method === 'service_principal') {
+        args.push('--authentication-method', 'ActiveDirectoryServicePrincipal');
+        args.push('-U', client_id || '');
+        args.push('-P', password || '');
+        args.push('--tenant-id', tenant_id || '');
+    } else {
+        args.push('-U', username || 'sa');
+        args.push('-P', password || '');
+    }
+
+    args.push('-N', encryptMode);
+    if (useTrustServerCert) args.push('-C');
+    args.push('-b', '-r', '1', '-h', '-1', '-W');
+    args.push('-Q', query);
+
+    return { args, command: 'sqlcmd', server: mssqlServer };
+}
+
+/**
+ * Translate spawn/connection errors into user-friendly messages.
+ * Detects missing CLI tools (ENOENT) and suggests installation steps.
+ */
+function friendlyDbError(error, dbType) {
+    const msg = String(error?.message || '');
+
+    if (error?.code === 'ENOENT' || msg.includes('ENOENT')) {
+        const toolMap = {
+            mssql:      { tool: 'sqlcmd',       pkg: 'go-sqlcmd (https://github.com/microsoft/go-sqlcmd)' },
+            postgresql: { tool: 'psql',          pkg: 'postgresql-client' },
+            mysql:      { tool: 'mysql',         pkg: 'mysql-client or mariadb-client' },
+            mariadb:    { tool: 'mysql',         pkg: 'mariadb-client' },
+            mongodb:    { tool: 'mongosh',       pkg: 'mongosh (https://www.mongodb.com/docs/mongodb-shell/)' },
+        };
+        const info = toolMap[dbType] || { tool: 'database client', pkg: 'the appropriate database client' };
+        return `"${info.tool}" is not installed on this system. ` +
+               `Install ${info.pkg} and make sure it is on the PATH, then try again. ` +
+               `(In the official Docker image this is pre-installed.)`;
+    }
+
+    if (/ETIMEOUT|ECONNREFUSED|ENOTFOUND/.test(msg)) {
+        return `Cannot reach the database server: ${msg}. Check hostname, port, and firewall rules.`;
+    }
+
+    return null;
+}
+
+function validateMssqlAuthInput({ auth_method, username, password, client_id, tenant_id }) {
+    const method = auth_method || 'sql';
+    if (!['sql', 'ad_password', 'service_principal'].includes(method)) {
+        throw new Error('Invalid MSSQL auth_method. Allowed: sql, ad_password, service_principal');
+    }
+    if (method === 'ad_password') {
+        if (!String(username || '').trim()) {
+            throw new Error('Azure AD Password authentication requires username');
+        }
+        if (!String(password || '').trim()) {
+            throw new Error('Azure AD Password authentication requires password');
+        }
+    }
+    if (method === 'service_principal') {
+        if (!String(client_id || '').trim()) {
+            throw new Error('Service Principal authentication requires client_id');
+        }
+        if (!String(tenant_id || '').trim()) {
+            throw new Error('Service Principal authentication requires tenant_id');
+        }
+        if (!String(password || '').trim()) {
+            throw new Error('Service Principal authentication requires client_secret');
+        }
+    }
+}
+
+/**
  * @route   GET /api/database-discovery/scan
  * @desc    Run database discovery scan
  * @access  Private (Available in both Director and Client modes)
@@ -197,7 +290,7 @@ router.post('/generate-config', authenticateToken, requireAdmin, async (req, res
  */
 router.post('/test-connection', authenticateToken, requireAdmin, async (req, res) => {
     try {
-        const { type, hostname, port, username, password, container, instance, encrypt, trustServerCert } = req.body;
+        const { type, hostname, port, username, password, container, instance, encrypt, trustServerCert, auth_method, client_id, tenant_id } = req.body;
 
         if (!type) {
             return res.status(400).json({
@@ -212,31 +305,17 @@ router.post('/test-connection', authenticateToken, requireAdmin, async (req, res
                 detail: `Test connection currently supports MSSQL only (got '${type}')`
             });
         }
+        validateMssqlAuthInput({ auth_method, username, password, client_id, tenant_id });
 
         const { spawn } = require('child_process');
-        const connectHost = hostname || container || 'localhost';
-        const mssqlServer = instance
-            ? `${connectHost},${port || 1433}\\${instance}`
-            : `${connectHost},${port || 1433}`;
-        const requestedEncrypt = ['true', 'false', 'strict'].includes(String(encrypt)) ? String(encrypt) : 'false';
-        const encryptMode = requestedEncrypt === 'false' ? 'disable' : requestedEncrypt;
-        const useTrustServerCert = trustServerCert !== undefined ? !!trustServerCert : true;
-
-        const args = [
-            '-S', mssqlServer,
-            '-U', username || 'sa',
-            '-P', password || '',
-            '-N', encryptMode,
-            '-b',
-            '-r', '1',
-            '-h', '-1',
-            '-W',
-            '-Q', 'SET NOCOUNT ON; SELECT @@SERVERNAME AS server_name, DB_NAME() AS current_db, 1 AS connection_ok'
-        ];
-        if (useTrustServerCert) args.splice(6, 0, '-C');
+        const { args, command, server: mssqlServer } = buildMssqlSqlcmdArgs({
+            hostname, port, username, password, container, instance, encrypt, trustServerCert,
+            auth_method, client_id, tenant_id,
+            query: 'SET NOCOUNT ON; SELECT @@SERVERNAME AS server_name, DB_NAME() AS current_db, 1 AS connection_ok',
+        });
 
         const result = await new Promise((resolve, reject) => {
-            const child = spawn('sqlcmd', args, { env: { ...process.env } });
+            const child = spawn(command, args, { env: { ...process.env } });
             let stdout = '';
             let stderr = '';
             const timer = setTimeout(() => {
@@ -249,7 +328,8 @@ router.post('/test-connection', authenticateToken, requireAdmin, async (req, res
             child.on('close', (code) => {
                 clearTimeout(timer);
                 if (code !== 0) {
-                    reject(new Error(stderr || `Connection test failed with code ${code}`));
+                    const detail = (stderr || stdout || '').trim();
+                    reject(new Error(detail || `Connection test failed with code ${code}`));
                 } else {
                     resolve(stdout.trim());
                 }
@@ -271,9 +351,13 @@ router.post('/test-connection', authenticateToken, requireAdmin, async (req, res
         });
     } catch (error) {
         console.error('MSSQL test connection failed:', error.message);
-        res.status(500).json({
+        const friendly = friendlyDbError(error, 'mssql');
+        const isValidationError =
+            /requires|Invalid MSSQL auth_method/.test(String(error.message || ''));
+        const status = friendly ? 503 : isValidationError ? 400 : 500;
+        res.status(status).json({
             success: false,
-            detail: error.message || 'Failed to test MSSQL connection'
+            detail: friendly || error.message || 'Failed to test MSSQL connection'
         });
     }
 });
@@ -285,13 +369,16 @@ router.post('/test-connection', authenticateToken, requireAdmin, async (req, res
  */
 router.post('/list-databases', authenticateToken, requireAdmin, async (req, res) => {
     try {
-        const { type, hostname, port, username, password, container, instance, encrypt, trustServerCert } = req.body;
+        const { type, hostname, port, username, password, container, instance, encrypt, trustServerCert, auth_method, client_id, tenant_id } = req.body;
 
         if (!type) {
             return res.status(400).json({
                 success: false,
                 detail: 'Database type is required'
             });
+        }
+        if (type === 'mssql') {
+            validateMssqlAuthInput({ auth_method, username, password, client_id, tenant_id });
         }
 
         const { spawn } = require('child_process');
@@ -346,33 +433,17 @@ router.post('/list-databases', authenticateToken, requireAdmin, async (req, res)
                 }
                 break;
 
-            case 'mssql':
-                // List MSSQL databases using sqlcmd
-                // sqlcmd is the Go-based version (no .NET required)
-                const mssqlServer = instance
-                    ? `${connectHost},${port || 1433}\\${instance}`
-                    : `${connectHost},${port || 1433}`;
+            case 'mssql': {
                 const mssqlQuery = "SET NOCOUNT ON; SELECT name FROM sys.databases WHERE database_id > 4 AND state = 0 AND name NOT IN ('master','tempdb','model','msdb')";
-                const requestedEncrypt = ['true', 'false', 'strict'].includes(String(encrypt)) ? String(encrypt) : 'false';
-                const encryptMode = requestedEncrypt === 'false' ? 'disable' : requestedEncrypt;
-                const useTrustServerCert = trustServerCert !== undefined ? !!trustServerCert : true;
-
-                // Always use local sqlcmd in borgmatic-ui container against network host.
-                // Avoid relying on image-specific sqlcmd paths inside DB containers.
-                command = 'sqlcmd';
-                args = [
-                    '-S', mssqlServer,
-                    '-U', username || 'sa',
-                    '-P', password || '',
-                    '-N', encryptMode,
-                    '-b',          // Exit with non-zero on SQL errors
-                    '-r', '1',     // Send errors to stderr
-                    '-h', '-1',    // No headers
-                    '-W',          // Trim trailing spaces
-                    '-Q', mssqlQuery
-                ];
-                if (useTrustServerCert) args.splice(6, 0, '-C');
+                const built = buildMssqlSqlcmdArgs({
+                    hostname, port, username, password, container, instance, encrypt, trustServerCert,
+                    auth_method, client_id, tenant_id,
+                    query: mssqlQuery,
+                });
+                command = built.command;
+                args = built.args;
                 break;
+            }
 
             default:
                 return res.status(400).json({
@@ -440,9 +511,13 @@ router.post('/list-databases', authenticateToken, requireAdmin, async (req, res)
         });
     } catch (error) {
         console.error('Failed to list databases:', error.message);
-        res.status(500).json({
+        const friendly = friendlyDbError(error, type);
+        const isValidationError =
+            /requires|Invalid MSSQL auth_method/.test(String(error.message || ''));
+        const status = friendly ? 503 : isValidationError ? 400 : 500;
+        res.status(status).json({
             success: false,
-            detail: error.message || 'Failed to list databases. Check credentials and connectivity.'
+            detail: friendly || error.message || 'Failed to list databases. Check credentials and connectivity.'
         });
     }
 });

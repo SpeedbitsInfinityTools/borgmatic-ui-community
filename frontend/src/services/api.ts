@@ -724,6 +724,9 @@ export const databaseDiscoveryAPI = {
     instance?: string;
     encrypt?: 'true' | 'false' | 'strict';
     trustServerCert?: boolean;
+    auth_method?: 'sql' | 'ad_password' | 'service_principal';
+    client_id?: string;
+    tenant_id?: string;
   }) => api.post('/database-discovery/list-databases', params),
 
   testConnection: (params: {
@@ -736,6 +739,9 @@ export const databaseDiscoveryAPI = {
     instance?: string;
     encrypt?: 'true' | 'false' | 'strict';
     trustServerCert?: boolean;
+    auth_method?: 'sql' | 'ad_password' | 'service_principal';
+    client_id?: string;
+    tenant_id?: string;
   }) => api.post('/database-discovery/test-connection', params),
 }
 
