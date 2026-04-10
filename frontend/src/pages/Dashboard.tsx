@@ -6,6 +6,7 @@ import { configParserAPI, backupsAPI, scheduleAPI, identityAPI, logsAPI, dashboa
 import { CheckCircle, XCircle, Loader, RefreshCw, Database, FileText, Clock, Download, Upload, AlertTriangle, Activity, Info, Wrench, HeartPulse, KeyRound, Cloud, Package, Bell, MessageSquare } from 'lucide-react';
 import { useBackupExecution } from '../hooks/useSSE';
 import { formatDateTime } from '../utils/dateFormat';
+import { calculateNextRun } from '../utils/cronNextRun';
 import { getSafeDisplayPath } from '../utils/repositoryUtils';
 import DirectorDashboard from '../components/DirectorDashboard';
 import { useDirector } from '../contexts/DirectorContext';
@@ -187,9 +188,7 @@ export default function Dashboard() {
     if (!scheduleId) return 'Not scheduled';
     const schedule = schedules.find((s: any) => s.id === scheduleId);
     if (!schedule || !schedule.cron_expression) return 'N/A';
-
-    // Simple next run calculation (for display purposes)
-    return 'Scheduled'; // TODO: Implement proper cron parsing
+    return calculateNextRun(schedule.cron_expression);
   };
 
   // Truncate long paths for display

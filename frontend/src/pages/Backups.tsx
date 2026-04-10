@@ -1,4 +1,5 @@
 import React, { useState, useRef } from 'react';
+import { calculateNextRun } from '../utils/cronNextRun';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import { Link } from 'react-router-dom';
 import {
@@ -370,48 +371,6 @@ const Backups: React.FC = () => {
       }));
     }
   }, [events, queryClient]);
-
-  // Calculate next run time from cron expression
-  const calculateNextRun = (cronExpression: string): string => {
-    try {
-      // Simple cron parser for common patterns
-      const parts = cronExpression.trim().split(/\s+/);
-      if (parts.length < 5) return 'Invalid schedule';
-
-      const [minute, hour] = parts;
-
-      const now = new Date();
-      const next = new Date(now);
-      next.setSeconds(0);
-      next.setMilliseconds(0);
-
-      // Parse minute and hour
-      if (minute !== '*') next.setMinutes(parseInt(minute));
-      if (hour !== '*') next.setHours(parseInt(hour));
-
-      // If the calculated time is in the past, add a day
-      if (next <= now) {
-        next.setDate(next.getDate() + 1);
-      }
-
-      // Calculate time difference
-      const diff = next.getTime() - now.getTime();
-      const hours = Math.floor(diff / (1000 * 60 * 60));
-      const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
-
-      if (hours < 1) {
-        return `in ${minutes} min`;
-      } else if (hours < 24) {
-        return `in ${hours}h ${minutes}m`;
-      } else {
-        const days = Math.floor(hours / 24);
-        const remainingHours = hours % 24;
-        return `in ${days}d ${remainingHours}h`;
-      }
-    } catch (error) {
-      return 'Unable to calculate';
-    }
-  };
 
   const handleWizardSuccess = () => {
     setShowCreateModal(false);

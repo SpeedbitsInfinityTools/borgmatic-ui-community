@@ -673,6 +673,14 @@ const BackupWizard: React.FC<BackupWizardProps> = ({
     setFormData({ ...formData, sources: newSources });
   };
 
+  const trimSourceField = (index: number, field: string) => {
+    const source = formData.sources[index];
+    const val = source?.[field];
+    if (typeof val === 'string' && val !== val.trim()) {
+      updateSource(index, field, val.trim());
+    }
+  };
+
   const getMssqlAuthHint = (source: any) => {
     const method = source?.auth_method || 'sql';
     if (method === 'service_principal') {
@@ -1292,6 +1300,7 @@ const BackupWizard: React.FC<BackupWizardProps> = ({
                               type="text"
                               value={source.database_name || ''}
                               onChange={(e) => updateSource(index, 'database_name', e.target.value)}
+                              onBlur={() => trimSourceField(index, 'database_name')}
                               className={`w-28 px-2 py-1 text-sm border rounded focus:ring-2 focus:ring-blue-500 focus:border-blue-500 ${source.database_name === 'all' ? 'border-purple-400 bg-purple-50' : 'border-gray-300'
                                 }`}
                               placeholder="db name"
@@ -1342,6 +1351,7 @@ const BackupWizard: React.FC<BackupWizardProps> = ({
                             type="text"
                             value={source.hostname ?? ''}
                             onChange={(e) => updateSource(index, 'hostname', e.target.value)}
+                            onBlur={() => trimSourceField(index, 'hostname')}
                             className="flex-1 min-w-[100px] px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                             placeholder="localhost"
                           />
@@ -1370,6 +1380,7 @@ const BackupWizard: React.FC<BackupWizardProps> = ({
                             type="text"
                             value={source.username || ''}
                             onChange={(e) => updateSource(index, 'username', e.target.value)}
+                            onBlur={() => trimSourceField(index, 'username')}
                             className="w-56 px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                             placeholder="Username"
                           />
@@ -1405,6 +1416,7 @@ const BackupWizard: React.FC<BackupWizardProps> = ({
                                 type="text"
                                 value={source.instance || ''}
                                 onChange={(e) => updateSource(index, 'instance', e.target.value)}
+                                onBlur={() => trimSourceField(index, 'instance')}
                                 className="w-32 px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                                 placeholder="Instance (optional)"
                                 title="Named instance (e.g., SQLEXPRESS)"
@@ -1435,6 +1447,7 @@ const BackupWizard: React.FC<BackupWizardProps> = ({
                                   type="text"
                                   value={source.client_id || ''}
                                   onChange={(e) => updateSource(index, 'client_id', e.target.value)}
+                                  onBlur={() => trimSourceField(index, 'client_id')}
                                   className="w-56 px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                                   placeholder="Client ID (Application ID) *"
                                   title="Azure AD Application (Client) ID"
@@ -1443,6 +1456,7 @@ const BackupWizard: React.FC<BackupWizardProps> = ({
                                   type="text"
                                   value={source.tenant_id || ''}
                                   onChange={(e) => updateSource(index, 'tenant_id', e.target.value)}
+                                  onBlur={() => trimSourceField(index, 'tenant_id')}
                                   className="w-56 px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                                   placeholder="Tenant ID *"
                                   title="Azure AD Tenant ID"
