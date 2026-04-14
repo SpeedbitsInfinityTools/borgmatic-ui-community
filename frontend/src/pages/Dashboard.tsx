@@ -722,6 +722,7 @@ export default function Dashboard() {
               <div className="flex items-center">
                 <Activity className="w-5 h-5 text-gray-600 mr-2" />
                 <h2 className="text-lg font-semibold text-gray-900">Recent Events</h2>
+                <span className="text-xs text-gray-400 ml-2">(UTC)</span>
               </div>
               <Link
                 to="/logs"
@@ -840,7 +841,9 @@ export default function Dashboard() {
                   {backups.map((backup: any) => {
                     const running = isRunning(backup.id);
                     const schedule = schedules.find((s: any) => s.id === backup.schedule_id);
-                    const sourcesText = backup.sources_summary?.map((s: any) => s.path || s.database_name).join(', ') || 'None';
+                    const sourcesText = backup.sources_summary?.map((s: any) =>
+                      s.type === 'git_repos' ? `${s.platform}: ${s.organization || s.group || s.workspace || s.user || s.repo_name || 'repos'}` : (s.path || s.database_name)
+                    ).join(', ') || 'None';
                     const repoText = backup.repositories_summary?.[0]?.path || 'None';
 
                     return (

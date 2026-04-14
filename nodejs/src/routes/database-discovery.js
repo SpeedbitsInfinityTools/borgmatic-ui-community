@@ -1,14 +1,25 @@
 const express = require('express');
 const router = express.Router();
 const { authenticateToken, requireAdmin } = require('../middleware/auth');
+const { isFeatureAvailable } = require('../utils/edition');
 const databaseDiscovery = require('../services/database-discovery');
 
+function respondMssqlFeatureGate(res) {
+    return res.status(402).json({
+        success: false,
+        error: 'payment_required',
+        detail: 'MS SQL Server backup is only available in the Commercial edition.',
+        upgrade_url: 'https://www.speedbits.io',
+        feature: 'mssql',
+    });
+}
+
 /**
- * Build sqlcmd args for MSSQL connections, handling SQL auth, Azure AD Password,
+ * Build sqlcmd args for MSSQL connections, handling SQL auth, Entra ID Password,
  * and Service Principal authentication methods.
  * @returns {{ args: string[], command: string }}
  */
-function buildMssqlSqlcmdArgs({ hostname, port, username, password, container, instance, encrypt, trustServerCert, auth_method, client_id, tenant_id, query }) {
+function buildMssqlSqlcmdArgs({ hostname, port, username, password, container, instance, encrypt, trustServerCert, auth_method, client_id, tenant_id, database_name, query }) {
     const connectHost = hostname || container || 'localhost';
     const mssqlServer = instance
         ? `${connectHost},${port || 1433}\\${instance}`
@@ -34,6 +45,9 @@ function buildMssqlSqlcmdArgs({ hostname, port, username, password, container, i
         args.push('-P', password || '');
     }
 
+    if (database_name && String(database_name).trim()) {
+        args.push('-d', String(database_name).trim());
+    }
     args.push('-N', encryptMode);
     if (useTrustServerCert) args.push('-C');
     args.push('-b', '-r', '1', '-h', '-1', '-W');
@@ -77,10 +91,10 @@ function validateMssqlAuthInput({ auth_method, username, password, client_id, te
     }
     if (method === 'ad_password') {
         if (!String(username || '').trim()) {
-            throw new Error('Azure AD Password authentication requires username');
+            throw new Error('Entra ID Password authentication requires username');
         }
         if (!String(password || '').trim()) {
-            throw new Error('Azure AD Password authentication requires password');
+            throw new Error('Entra ID Password authentication requires password');
         }
     }
     if (method === 'service_principal') {
@@ -95,6 +109,24 @@ function validateMssqlAuthInput({ auth_method, username, password, client_id, te
         }
     }
 }
+
+/**
+ * @route   GET /api/database-discovery/tool-check/:dbType
+ * @desc    Check if required CLI tools for a database type are installed
+ * @access  Private
+ */
+router.get('/tool-check/:dbType', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        if (req.params.dbType === 'mssql' && !isFeatureAvailable('mssql')) {
+            return respondMssqlFeatureGate(res);
+        }
+        const { checkDbTools } = require('../utils/db-tool-check');
+        const result = checkDbTools(req.params.dbType);
+        res.json({ success: true, data: result });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
 
 /**
  * @route   GET /api/database-discovery/scan
@@ -290,7 +322,7 @@ router.post('/generate-config', authenticateToken, requireAdmin, async (req, res
  */
 router.post('/test-connection', authenticateToken, requireAdmin, async (req, res) => {
     try {
-        const { type, hostname, port, username, password, container, instance, encrypt, trustServerCert, auth_method, client_id, tenant_id } = req.body;
+        const { type, hostname, port, username, password, container, instance, encrypt, trustServerCert, auth_method, client_id, tenant_id, database_name } = req.body;
 
         if (!type) {
             return res.status(400).json({
@@ -305,23 +337,26 @@ router.post('/test-connection', authenticateToken, requireAdmin, async (req, res
                 detail: `Test connection currently supports MSSQL only (got '${type}')`
             });
         }
+        if (!isFeatureAvailable('mssql')) {
+            return respondMssqlFeatureGate(res);
+        }
         validateMssqlAuthInput({ auth_method, username, password, client_id, tenant_id });
 
         const { spawn } = require('child_process');
         const { args, command, server: mssqlServer } = buildMssqlSqlcmdArgs({
             hostname, port, username, password, container, instance, encrypt, trustServerCert,
-            auth_method, client_id, tenant_id,
+            auth_method, client_id, tenant_id, database_name,
             query: 'SET NOCOUNT ON; SELECT @@SERVERNAME AS server_name, DB_NAME() AS current_db, 1 AS connection_ok',
         });
 
-        const result = await new Promise((resolve, reject) => {
+        const runSqlcmd = () => new Promise((resolve, reject) => {
             const child = spawn(command, args, { env: { ...process.env } });
             let stdout = '';
             let stderr = '';
             const timer = setTimeout(() => {
                 child.kill('SIGKILL');
-                reject(new Error('Connection test timed out after 15 seconds'));
-            }, 15000);
+                reject(new Error('Connection test timed out after 20 seconds.'));
+            }, 20000);
 
             child.stdout.on('data', (data) => stdout += data.toString());
             child.stderr.on('data', (data) => stderr += data.toString());
@@ -339,6 +374,18 @@ router.post('/test-connection', authenticateToken, requireAdmin, async (req, res
                 reject(error);
             });
         });
+
+        let result;
+        try {
+            result = await runSqlcmd();
+        } catch (firstError) {
+            if (/timed? ?out|i\/o timeout|ETIMEOUT/i.test(firstError.message)) {
+                console.log('MSSQL test connection: first attempt timed out, retrying once…');
+                result = await runSqlcmd();
+            } else {
+                throw firstError;
+            }
+        }
 
         res.json({
             success: true,
@@ -378,6 +425,9 @@ router.post('/list-databases', authenticateToken, requireAdmin, async (req, res)
             });
         }
         if (type === 'mssql') {
+            if (!isFeatureAvailable('mssql')) {
+                return respondMssqlFeatureGate(res);
+            }
             validateMssqlAuthInput({ auth_method, username, password, client_id, tenant_id });
         }
 

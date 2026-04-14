@@ -193,6 +193,7 @@ export default function LogsOverview() {
           </h1>
           <p className="mt-1 text-sm text-gray-500">
             Monitor logs and events from all connected clients
+            <span className="ml-2 text-xs text-gray-400">(timestamps are in server time / UTC)</span>
           </p>
         </div>
         <button
@@ -328,7 +329,7 @@ export default function LogsOverview() {
                 <h3 className="text-lg font-semibold text-gray-900">
                   Log Events: {selectedClient.name}
                 </h3>
-                <p className="text-sm text-gray-500 mt-1">Last 100 log entries</p>
+                <p className="text-sm text-gray-500 mt-1">Last 100 log entries <span className="text-xs text-gray-400">(timestamps are in server time / UTC)</span></p>
               </div>
               <button
                 onClick={() => {

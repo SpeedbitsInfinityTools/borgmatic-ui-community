@@ -47,6 +47,7 @@ router.get('/system', authenticateToken, async (req, res) => {
             webhook_url: '',
             auto_cleanup: true,
             cleanup_retention_days: 90,
+            dump_temp_dir: '/tmp',
             borgmatic_version: '2.0.8', // This would be retrieved from borgmatic CLI
             app_version: getAppVersion()
         };
@@ -83,7 +84,8 @@ router.put('/system', authenticateToken, requireAdmin, async (req, res) => {
             email_notifications,
             webhook_url,
             auto_cleanup,
-            cleanup_retention_days
+            cleanup_retention_days,
+            dump_temp_dir
         } = req.body;
 
         // Get current config
@@ -116,6 +118,13 @@ router.put('/system', authenticateToken, requireAdmin, async (req, res) => {
         if (cleanup_retention_days !== undefined) {
             config.system_settings.cleanup_retention_days = cleanup_retention_days;
         }
+        if (dump_temp_dir !== undefined) {
+            const trimmed = String(dump_temp_dir).trim();
+            if (trimmed.includes('\0') || !trimmed.startsWith('/')) {
+                return res.status(400).json({ success: false, detail: 'Dump directory must be an absolute path' });
+            }
+            config.system_settings.dump_temp_dir = path.resolve(trimmed);
+        }
 
         // Add update timestamp
         config.system_settings.updated_at = new Date().toISOString();
@@ -136,6 +145,64 @@ router.put('/system', authenticateToken, requireAdmin, async (req, res) => {
             success: false,
             detail: 'Failed to update system settings'
         });
+    }
+});
+
+/**
+ * Test a directory for use as the database dump temp path.
+ * Checks: exists (or can be created), writable, and reports free space.
+ * POST /api/settings/system/test-dump-dir
+ */
+router.post('/system/test-dump-dir', authenticateToken, requireAdmin, async (req, res) => {
+    const { dir } = req.body;
+    if (!dir || typeof dir !== 'string' || !dir.trim().startsWith('/')) {
+        return res.status(400).json({ success: false, detail: 'An absolute directory path is required.' });
+    }
+    const target = path.resolve(dir.trim());
+    const results = { path: target, exists: false, writable: false, free_space: null, error: null };
+
+    try {
+        // Create if missing
+        if (!await fs.pathExists(target)) {
+            await fs.ensureDir(target);
+            results.exists = true;
+        } else {
+            const stat = await fs.stat(target);
+            if (!stat.isDirectory()) {
+                results.error = 'Path exists but is not a directory.';
+                return res.json({ success: true, results });
+            }
+            results.exists = true;
+        }
+
+        // Write test
+        const testFile = path.join(target, `.borgmatic_ui_write_test_${Date.now()}`);
+        try {
+            await fs.writeFile(testFile, 'write-test');
+            await fs.remove(testFile);
+            results.writable = true;
+        } catch {
+            results.error = 'Directory exists but is not writable.';
+            return res.json({ success: true, results });
+        }
+
+        // Free space (df)
+        try {
+            const { execFileSync } = require('child_process');
+            const dfOut = execFileSync('df', ['-P', '-B1', target], { encoding: 'utf8', timeout: 5000 });
+            const lines = dfOut.trim().split('\n');
+            if (lines.length >= 2) {
+                const parts = lines[1].split(/\s+/);
+                if (parts.length >= 4) {
+                    results.free_space = parseInt(parts[3], 10) || null;
+                }
+            }
+        } catch { /* non-critical */ }
+
+        res.json({ success: true, results });
+    } catch (error) {
+        results.error = error.message;
+        res.json({ success: true, results });
     }
 });
 

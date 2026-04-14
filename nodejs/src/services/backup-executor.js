@@ -106,6 +106,14 @@ class BackupExecutor {
 
             // Get repository passphrases and SSH credentials
             const env = { ...process.env };
+
+            // Augment PATH: the Node process may have been started with a minimal
+            // PATH (e.g. via sudo or systemd). Ensure common tool directories are
+            // included so borgmatic hooks can locate binaries like sqlpackage, sqlcmd,
+            // pg_dump, etc.
+            const { getMssqlToolPathEntries, appendExistingPaths } = require('../utils/mssql-tool-paths');
+            env.PATH = appendExistingPaths(env.PATH, getMssqlToolPathEntries(process.env));
+
             const repositoryCredentials = require('./repository-credentials');
             // NOTE: configParser already required above (used for read-only validation)
             
@@ -312,7 +320,8 @@ class BackupExecutor {
             // We scan the YAML for placeholders like ${BORGMATIC_UI_DB_PASS_*} and populate those env vars.
             try {
                 const yamlText = await fs.readFile(configPath, 'utf8');
-                const matches = Array.from(yamlText.matchAll(/\$\{(BORGMATIC_UI_DB_PASS_[A-Za-z0-9_]+)/g)).map(m => m[1]);
+                // Match both ${VAR} (legacy) and $(printenv VAR) patterns
+                const matches = Array.from(yamlText.matchAll(/(?:\$\{|printenv\s+)(BORGMATIC_UI_DB_PASS_[A-Za-z0-9_]+)/g)).map(m => m[1]);
                 const uniqueEnvVars = Array.from(new Set(matches));
                 
                 if (uniqueEnvVars.length > 0) {
@@ -342,6 +351,50 @@ class BackupExecutor {
                 }
             } catch (e) {
                 console.warn('⚠️  Could not scan config for DB password placeholders:', e.message);
+            }
+
+            // Pre-flight: verify MSSQL tools are available before starting
+            const hasMssqlSources = (backup.sources_summary || []).some(s => s.type === 'mssql');
+            if (hasMssqlSources) {
+                const { checkMssqlTools } = require('../utils/db-tool-check');
+                const toolCheck = checkMssqlTools();
+                if (!toolCheck.ok) {
+                    const errMsg = 'MSSQL backup aborted — required tools not installed:\n' + toolCheck.errors.join('\n');
+                    console.error(`❌ ${errMsg}`);
+                    await backupManager.updateBackupMetadata(backupId, {
+                        last_run: new Date().toISOString(),
+                        last_run_status: 'failed'
+                    });
+                    this.runningBackups.delete(backupId);
+                    eventManager.broadcastEvent('backup_failed', {
+                        backup_id: backupId,
+                        backup_name: backup.name,
+                        error: errMsg,
+                    });
+                    return { success: false, error: errMsg };
+                }
+            }
+
+            // Pre-flight: verify AWS CLI is available when IAM auth is used
+            const hasAwsIamSources = (backup.sources_summary || []).some(s => s.auth_method === 'aws_iam');
+            if (hasAwsIamSources) {
+                const { checkAwsTools } = require('../utils/db-tool-check');
+                const toolCheck = checkAwsTools();
+                if (!toolCheck.ok) {
+                    const errMsg = 'Database backup aborted — AWS CLI not installed (required for IAM auth):\n' + toolCheck.errors.join('\n');
+                    console.error(`❌ ${errMsg}`);
+                    await backupManager.updateBackupMetadata(backupId, {
+                        last_run: new Date().toISOString(),
+                        last_run_status: 'failed'
+                    });
+                    this.runningBackups.delete(backupId);
+                    eventManager.broadcastEvent('backup_failed', {
+                        backup_id: backupId,
+                        backup_name: backup.name,
+                        error: errMsg,
+                    });
+                    return { success: false, error: errMsg };
+                }
             }
 
             // Get log settings

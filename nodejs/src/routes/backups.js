@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { authenticateToken, requireAdmin } = require('../middleware/auth');
+const { isFeatureAvailable } = require('../utils/edition');
 const backupManager = require('../services/backup-manager');
 const retentionManager = require('../services/retention-manager');
 
@@ -86,6 +87,50 @@ router.post('/', authenticateToken, requireAdmin, async (req, res) => {
             });
         }
 
+        // Feature gates: check commercial edition for gated source types
+        const mssqlSources = (backupData.sources || []).filter(s => s.type === 'mssql');
+        if (mssqlSources.length > 0 && !isFeatureAvailable('mssql')) {
+            return res.status(402).json({
+                success: false, error: 'payment_required',
+                detail: 'MS SQL Server backup is only available in the Commercial edition.',
+                upgrade_url: 'https://www.speedbits.io', feature: 'mssql',
+            });
+        }
+        const awsIamSources = (backupData.sources || []).filter(
+            s => ['postgresql', 'mysql', 'mariadb'].includes(s.type) && s.auth_method === 'aws_iam'
+        );
+        if (awsIamSources.length > 0 && !isFeatureAvailable('aws_iam')) {
+            return res.status(402).json({
+                success: false, error: 'payment_required',
+                detail: 'AWS IAM database authentication is only available in the Commercial edition.',
+                upgrade_url: 'https://www.speedbits.io', feature: 'aws_iam',
+            });
+        }
+
+        // Pre-flight: verify required CLI tools for any MSSQL sources
+        if (mssqlSources.length > 0) {
+            const { checkMssqlTools } = require('../utils/db-tool-check');
+            const toolCheck = checkMssqlTools();
+            if (!toolCheck.ok) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'MSSQL backup requires tools that are not installed:\n' + toolCheck.errors.join('\n'),
+                    tool_check: toolCheck,
+                });
+            }
+        }
+        if (awsIamSources.length > 0) {
+            const { checkAwsTools } = require('../utils/db-tool-check');
+            const toolCheck = checkAwsTools();
+            if (!toolCheck.ok) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'AWS IAM database authentication requires aws-cli:\n' + toolCheck.errors.join('\n'),
+                    tool_check: toolCheck,
+                });
+            }
+        }
+
         const backup = await backupManager.createBackup(backupData);
 
         res.status(201).json({
@@ -109,6 +154,50 @@ router.post('/', authenticateToken, requireAdmin, async (req, res) => {
  */
 router.put('/:id', authenticateToken, requireAdmin, async (req, res) => {
     try {
+        // Feature gates: check commercial edition for gated source types
+        const mssqlSources = (req.body.sources || []).filter(s => s.type === 'mssql');
+        if (mssqlSources.length > 0 && !isFeatureAvailable('mssql')) {
+            return res.status(402).json({
+                success: false, error: 'payment_required',
+                detail: 'MS SQL Server backup is only available in the Commercial edition.',
+                upgrade_url: 'https://www.speedbits.io', feature: 'mssql',
+            });
+        }
+        const awsIamSources = (req.body.sources || []).filter(
+            s => ['postgresql', 'mysql', 'mariadb'].includes(s.type) && s.auth_method === 'aws_iam'
+        );
+        if (awsIamSources.length > 0 && !isFeatureAvailable('aws_iam')) {
+            return res.status(402).json({
+                success: false, error: 'payment_required',
+                detail: 'AWS IAM database authentication is only available in the Commercial edition.',
+                upgrade_url: 'https://www.speedbits.io', feature: 'aws_iam',
+            });
+        }
+
+        // Pre-flight: verify required CLI tools for any MSSQL sources
+        if (mssqlSources.length > 0) {
+            const { checkMssqlTools } = require('../utils/db-tool-check');
+            const toolCheck = checkMssqlTools();
+            if (!toolCheck.ok) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'MSSQL backup requires tools that are not installed:\n' + toolCheck.errors.join('\n'),
+                    tool_check: toolCheck,
+                });
+            }
+        }
+        if (awsIamSources.length > 0) {
+            const { checkAwsTools } = require('../utils/db-tool-check');
+            const toolCheck = checkAwsTools();
+            if (!toolCheck.ok) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'AWS IAM database authentication requires aws-cli:\n' + toolCheck.errors.join('\n'),
+                    tool_check: toolCheck,
+                });
+            }
+        }
+
         const backup = await backupManager.updateBackup(req.params.id, req.body);
 
         res.json({

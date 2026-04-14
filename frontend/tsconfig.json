@@ -18,7 +18,7 @@
     "jsx": "react-jsx",
     /* Linting */
     "strict": false,
-    "types": [],
+    "types": ["vitest/globals"],
     "noUnusedLocals": false,
     "noUnusedParameters": false,
     "noFallthroughCasesInSwitch": true,

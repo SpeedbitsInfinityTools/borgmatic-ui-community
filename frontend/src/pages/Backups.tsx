@@ -27,7 +27,8 @@ import {
   FolderOpen,
   Zap,
   LayoutGrid,
-  List
+  List,
+  GitBranch,
 } from 'lucide-react';
 import { backupsAPI, scheduleAPI, templatesAPI, identityAPI } from '../services/api';
 import { toast } from 'react-hot-toast';
@@ -888,16 +889,21 @@ const Backups: React.FC = () => {
                         <label className="text-xs font-medium text-gray-500 uppercase">Sources</label>
                         <div className="mt-1 space-y-1">
                           {backup.sources_summary?.map((source: any, idx: number) => {
-                            const isDatabase = ['postgresql', 'mysql', 'mariadb', 'mongodb', 'sqlite'].includes(source.type);
+                            const isDatabase = ['postgresql', 'mysql', 'mariadb', 'mongodb', 'sqlite', 'mssql'].includes(source.type);
+                            const isGitRepo = source.type === 'git_repos';
                             return (
                               <div key={idx} className="flex items-center text-sm text-gray-600">
-                                {isDatabase ? (
+                                {isGitRepo ? (
+                                  <GitBranch className="w-3 h-3 mr-2 text-purple-500" />
+                                ) : isDatabase ? (
                                   <Database className="w-3 h-3 mr-2 text-blue-500" />
                                 ) : (
                                   <FolderOpen className="w-3 h-3 mr-2 text-yellow-600" />
                                 )}
                                 <span className="truncate">
-                                  {isDatabase ? `${source.type}: ${source.database_name || 'all'}` : source.path}
+                                  {isGitRepo
+                                    ? `${source.platform}: ${source.organization || source.group || source.workspace || source.user || source.repo_name || 'repos'}`
+                                    : isDatabase ? `${source.type}: ${source.database_name || 'all'}` : source.path}
                                 </span>
                               </div>
                             );
@@ -1155,19 +1161,23 @@ const Backups: React.FC = () => {
                       {!expandedSources.has(backup.id) && backup.sources_summary && backup.sources_summary.length > 0 && (
                         <div className="mt-1 ml-2 flex flex-wrap gap-1">
                           {backup.sources_summary.slice(0, 3).map((source: any, idx: number) => {
-                            const isDatabase = ['postgresql', 'mysql', 'mariadb', 'mongodb', 'sqlite'].includes(source.type);
-                            // For databases, show container/hostname; for files, show folder name
-                            const displayName = isDatabase
+                            const isDatabase = ['postgresql', 'mysql', 'mariadb', 'mongodb', 'sqlite', 'mssql'].includes(source.type);
+                            const isGitRepo = source.type === 'git_repos';
+                            const displayName = isGitRepo
+                              ? `${source.platform}: ${source.organization || source.group || source.workspace || source.user || 'repos'}`
+                              : isDatabase
                               ? (source.hostname ? `@${source.hostname}` : source.path || source.type)
                               : (source.path?.split('/').pop() || 'Local');
                             return (
                               <span
                                 key={idx}
-                                className={`text-xs px-1.5 py-0.5 rounded ${isDatabase
+                                className={`text-xs px-1.5 py-0.5 rounded ${isGitRepo
+                                  ? 'bg-purple-50 text-purple-700'
+                                  : isDatabase
                                   ? 'bg-blue-50 text-blue-700'
                                   : 'bg-yellow-50 text-yellow-700'
                                   }`}
-                                title={isDatabase ? `${source.type}: ${source.database_name || 'all'}` : source.path}
+                                title={isGitRepo ? `Git: ${source.organization || source.group || source.workspace || ''}` : isDatabase ? `${source.type}: ${source.database_name || 'all'}` : source.path}
                               >
                                 {displayName}
                               </span>
@@ -1183,10 +1193,21 @@ const Backups: React.FC = () => {
                       {expandedSources.has(backup.id) && backup.sources_summary && backup.sources_summary.length > 0 && (
                         <div className="mt-2 ml-2 pl-3 border-l-2 border-gray-200 space-y-1">
                           {backup.sources_summary.map((source: any, idx: number) => {
-                            const isDatabase = ['postgresql', 'mysql', 'mariadb', 'mongodb', 'sqlite'].includes(source.type);
+                            const isDatabase = ['postgresql', 'mysql', 'mariadb', 'mongodb', 'sqlite', 'mssql'].includes(source.type);
+                            const isGitRepo = source.type === 'git_repos';
                             return (
                               <div key={idx} className="flex items-center text-xs text-gray-600">
-                                {isDatabase ? (
+                                {isGitRepo ? (
+                                  <>
+                                    <GitBranch className="w-3 h-3 mr-2 text-purple-500" />
+                                    <span className="font-medium">{source.platform}:</span>
+                                    <span className="ml-1">{source.organization || source.group || source.workspace || source.user || source.repo_name || 'repos'}</span>
+                                    <span className="ml-2 px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 text-xs">{source.backup_type || 'mirror'}</span>
+                                    {source.repo_selection === 'selected' && source.selected_repos?.length > 0 && (
+                                      <span className="ml-1 text-gray-400">({source.selected_repos.length} repos)</span>
+                                    )}
+                                  </>
+                                ) : isDatabase ? (
                                   <>
                                     <Database className="w-3 h-3 mr-2 text-blue-500" />
                                     <span className="font-medium">{source.type}:</span>
@@ -1194,7 +1215,6 @@ const Backups: React.FC = () => {
                                     {source.hostname && (
                                       <span className="ml-1 text-gray-400">@{source.hostname}</span>
                                     )}
-                                    {/* Connection method indicator */}
                                     {source.is_host_database && (
                                       <span className="ml-2 px-1.5 py-0.5 rounded bg-orange-100 text-orange-700 text-xs" title="host.docker.internal">
                                         🖥️ host
@@ -1729,16 +1749,22 @@ const Backups: React.FC = () => {
                     {viewingBackup.sources_summary.map((source: any, idx: number) => (
                       <div key={idx} className="flex items-start space-x-3 p-3 bg-gray-50 rounded border border-gray-100">
                         <div className="flex-shrink-0">
-                          {source.type === 'local' ? (
+                          {source.type === 'git_repos' ? (
+                            <GitBranch className="w-4 h-4 text-purple-600 mt-0.5" />
+                          ) : source.type === 'local' ? (
                             <FileText className="w-4 h-4 text-gray-600 mt-0.5" />
                           ) : (
                             <Database className="w-4 h-4 text-blue-600 mt-0.5" />
                           )}
                         </div>
                         <div className="flex-1 min-w-0">
-                          <p className="text-xs font-medium text-gray-500 uppercase">{source.type}</p>
+                          <p className="text-xs font-medium text-gray-500 uppercase">
+                            {source.type === 'git_repos' ? `Git (${source.platform})` : source.type}
+                          </p>
                           <p className="text-sm text-gray-900 font-mono break-all">
-                            {source.path || source.name || source.database_name || 'N/A'}
+                            {source.type === 'git_repos'
+                              ? `${source.organization || source.group || source.workspace || source.user || source.repo_name || 'repos'} → ${source.target_dir || 'N/A'}`
+                              : (source.path || source.name || source.database_name || 'N/A')}
                           </p>
                         </div>
                       </div>

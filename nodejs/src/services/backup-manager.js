@@ -7,6 +7,8 @@ const { promisify } = require('util');
 const config = require('../config');
 const retentionManager = require('./retention-manager');
 const configParser = require('./config-parser');
+const dbGen = require('./db-script-generators');
+const hookEx = require('./hook-extractors');
 
 const execAsync = promisify(exec);
 
@@ -20,205 +22,42 @@ class BackupManager {
         this.metadataPath = path.join(config.configDir, 'backups-metadata.yaml');
     }
 
+    /**
+     * Return the base directory for database dump temp files.
+     * Reads from system_settings.dump_temp_dir; falls back to /tmp.
+     */
+    async _getDumpBaseDir() {
+        try {
+            const borgmaticConfig = require('./borgmatic-config');
+            const cfg = await borgmaticConfig.loadConfig();
+            const dir = cfg?.system_settings?.dump_temp_dir;
+            if (typeof dir === 'string' && dir.startsWith('/')) return dir;
+        } catch { /* fall through */ }
+        return '/tmp';
+    }
+
     _isDumpTempPath(dir) {
-        return typeof dir === 'string' && (
-            dir === '/tmp/borgmatic_mssql_dumps' ||
-            dir.startsWith('/tmp/borgmatic_mssql_dumps_') ||
-            dir.startsWith('/tmp/borgmatic_db_dumps_')
+        if (typeof dir !== 'string') return false;
+        const base = path.basename(dir);
+        return (
+            // Legacy path from early versions
+            base === 'borgmatic_mssql_dumps' ||
+            // Current generated naming (includes backup identifier)
+            base.startsWith('borgmatic_mssql_dumps_backup_') ||
+            base.startsWith('borgmatic_db_dumps_backup_')
         );
     }
 
-    _validateMssqlInputs(dbSource) {
-        const identifierRegex = /^[A-Za-z0-9_-]+$/;
-        const hostRegex = /^[A-Za-z0-9.-]+$/;
-        const userRegex = /^[A-Za-z0-9_.@\\-]+$/;
-        const instanceRegex = /^[A-Za-z0-9_-]+$/;
-        const guidRegex = /^[A-Za-z0-9-]+$/;
 
-        const dbName = String(dbSource.database_name || '').trim();
-        if (!dbName) throw new Error('MSSQL database name is required');
-        if (dbName !== 'all' && !identifierRegex.test(dbName)) {
-            throw new Error('Invalid MSSQL database name. Allowed: letters, numbers, underscore, dash');
-        }
+    // Delegated to db-script-generators.js
+    _validateMssqlInputs(dbSource) { return dbGen.validateMssqlInputs(dbSource); }
+    _validateHookDbInputs(dbSource) { return dbGen.validateHookDbInputs(dbSource); }
+    _shellSingleQuote(value) { return dbGen.shellSingleQuote(value); }
 
-        const host = dbSource.is_host_database ? 'host.docker.internal' : String(dbSource.hostname || 'localhost');
-        if (!hostRegex.test(host)) {
-            throw new Error('Invalid MSSQL hostname');
-        }
-
-        const user = String(dbSource.username || 'sa').trim();
-        if (!userRegex.test(user)) {
-            throw new Error('Invalid MSSQL username');
-        }
-
-        const rawPort = Number(dbSource.port || 1433);
-        if (!Number.isInteger(rawPort) || rawPort < 1 || rawPort > 65535) {
-            throw new Error('Invalid MSSQL port');
-        }
-
-        const instance = dbSource.instance ? String(dbSource.instance).trim() : '';
-        if (instance && !instanceRegex.test(instance)) {
-            throw new Error('Invalid MSSQL instance name');
-        }
-
-        const encrypt = dbSource.encrypt ? String(dbSource.encrypt) : 'true';
-        if (!['true', 'false', 'strict'].includes(encrypt)) {
-            throw new Error('Invalid MSSQL encrypt mode');
-        }
-
-        const auth_method = dbSource.auth_method || 'sql';
-        if (!['sql', 'ad_password', 'service_principal'].includes(auth_method)) {
-            throw new Error('Invalid MSSQL auth method');
-        }
-
-        let client_id = '';
-        let tenant_id = '';
-        if (auth_method === 'service_principal') {
-            client_id = String(dbSource.client_id || '').trim();
-            if (!client_id || !guidRegex.test(client_id)) {
-                throw new Error('Service Principal requires a valid Client ID (Application ID)');
-            }
-            tenant_id = String(dbSource.tenant_id || '').trim();
-            if (!tenant_id || !guidRegex.test(tenant_id)) {
-                throw new Error('Service Principal requires a valid Tenant ID');
-            }
-        }
-
-        return { dbName, host, user, port: rawPort, instance, encrypt, auth_method, client_id, tenant_id };
-    }
-
-    _validateHookDbInputs(dbSource) {
-        const supported = ['mariadb', 'mysql', 'postgresql', 'mongodb'];
-        if (!supported.includes(dbSource?.type)) {
-            throw new Error(`Unsupported database type: ${dbSource?.type || 'unknown'}`);
-        }
-
-        const dbName = String(dbSource.database_name || '').trim();
-        if (!dbName) {
-            throw new Error(`${dbSource.type} database name is required`);
-        }
-        if (dbName !== 'all' && !/^[A-Za-z0-9_.-]+$/.test(dbName)) {
-            throw new Error(`Invalid ${dbSource.type} database name`);
-        }
-
-        const host = dbSource.is_host_database ? 'host.docker.internal' : String(dbSource.hostname || 'localhost').trim();
-        if (!/^[A-Za-z0-9.-]+$/.test(host)) {
-            throw new Error(`Invalid ${dbSource.type} hostname`);
-        }
-
-        const rawPort = Number(dbSource.port || this._getDefaultPort(dbSource.type));
-        if (!Number.isInteger(rawPort) || rawPort < 1 || rawPort > 65535) {
-            throw new Error(`Invalid ${dbSource.type} port`);
-        }
-
-        const username = String(dbSource.username || '').trim();
-        if (username && !/^[A-Za-z0-9_.@\\-]+$/.test(username)) {
-            throw new Error(`Invalid ${dbSource.type} username`);
-        }
-
-        const authDb = String(dbSource.authentication_database || 'admin').trim();
-        if (dbSource.type === 'mongodb' && authDb && !/^[A-Za-z0-9_.-]+$/.test(authDb)) {
-            throw new Error('Invalid mongodb authentication database name');
-        }
-
-        return { dbName, host, user: username, port: rawPort, authDb };
-    }
-
-    _shellSingleQuote(value) {
-        return `'${String(value ?? '').replace(/'/g, `'\"'\"'`)}'`;
-    }
-
-    _extractMssqlSourcesFromHooks(config) {
-        const sources = [];
-        const hooks = [];
-        if (Array.isArray(config.before_backup)) {
-            hooks.push(...config.before_backup);
-        }
-        // New borgmatic 2.x hook format.
-        if (Array.isArray(config.commands)) {
-            for (const commandHook of config.commands) {
-                if (!commandHook || !Array.isArray(commandHook.run)) continue;
-                hooks.push(...commandHook.run);
-            }
-        }
-        const marker = 'BORGMATIC_UI_MSSQL_META_B64:';
-
-        for (const hook of hooks) {
-            if (typeof hook !== 'string' || !hook.includes(marker)) continue;
-            try {
-                const line = hook.split('\n').find((l) => l.includes(marker));
-                if (!line) continue;
-                const encoded = line.substring(line.indexOf(marker) + marker.length).trim();
-                const parsed = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
-                if (parsed?.type === 'mssql') {
-                    const src = {
-                        type: 'mssql',
-                        database_name: parsed.database_name,
-                        hostname: parsed.hostname,
-                        port: parsed.port,
-                        username: parsed.username,
-                        instance: parsed.instance || '',
-                        encrypt: parsed.encrypt || 'true',
-                        trustServerCert: !!parsed.trustServerCert,
-                        is_host_database: !!parsed.is_host_database,
-                        password: undefined,
-                        auth_method: parsed.auth_method || 'sql',
-                    };
-                    if (parsed.client_id) src.client_id = parsed.client_id;
-                    if (parsed.tenant_id) src.tenant_id = parsed.tenant_id;
-                    sources.push(src);
-                }
-            } catch (e) {
-                // Ignore malformed metadata markers from older/broken configs.
-            }
-        }
-
-        return sources;
-    }
-
-    _extractDbDumpSourcesFromHooks(config) {
-        const sources = [];
-        const hooks = [];
-        if (Array.isArray(config.commands)) {
-            for (const commandHook of config.commands) {
-                if (!commandHook || !Array.isArray(commandHook.run)) continue;
-                hooks.push(...commandHook.run);
-            }
-        }
-        const marker = 'BORGMATIC_UI_DB_META_B64:';
-
-        for (const hook of hooks) {
-            if (typeof hook !== 'string' || !hook.includes(marker)) continue;
-            try {
-                const line = hook.split('\n').find((l) => l.includes(marker));
-                if (!line) continue;
-                const encoded = line.substring(line.indexOf(marker) + marker.length).trim();
-                const parsed = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
-                if (parsed?.type && ['mariadb', 'mysql', 'postgresql', 'mongodb'].includes(parsed.type)) {
-                    const envVar = parsed.db_password_env_var;
-                    const placeholder = typeof envVar === 'string' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(envVar)
-                        ? '${' + envVar + '}'
-                        : undefined;
-                    sources.push({
-                        type: parsed.type,
-                        database_name: parsed.database_name,
-                        hostname: parsed.hostname,
-                        port: parsed.port,
-                        username: parsed.username,
-                        tls: parsed.tls,
-                        authentication_database: parsed.authentication_database,
-                        is_host_database: !!parsed.is_host_database,
-                        dump_method: 'local',
-                        password: placeholder,
-                    });
-                }
-            } catch (e) {
-                // Ignore malformed metadata
-            }
-        }
-
-        return sources;
-    }
+    // Delegated to hook-extractors.js
+    _extractMssqlSourcesFromHooks(config) { return hookEx.extractMssqlSourcesFromHooks(config); }
+    _extractDbDumpSourcesFromHooks(config) { return hookEx.extractDbDumpSourcesFromHooks(config); }
+    _extractGitRepoSourcesFromHooks(config) { return hookEx.extractGitRepoSourcesFromHooks(config); }
 
     /**
      * Append a borgmatic 2.x command hook.
@@ -879,6 +718,20 @@ class BackupManager {
                 console.log(`✓ Deleted YAML file: ${yamlPath}`);
             }
 
+            // Clean up associated git repo job/keys YAML files
+            const safeId = String(backupId).replace(/[^A-Za-z0-9_]/g, '_');
+            try {
+                const files = await fs.readdir(this.backupsDir);
+                for (const f of files) {
+                    if (f.startsWith(`git-job-${safeId}-`) || f.startsWith(`git-keys-${safeId}-`)) {
+                        await fs.remove(path.join(this.backupsDir, f));
+                        console.log(`✓ Deleted git config file: ${f}`);
+                    }
+                }
+            } catch (e) {
+                console.warn('⚠️ Could not clean up git config files:', e.message);
+            }
+
             // Remove from metadata if it was there
             metadata.backups = (metadata.backups || []).filter(b => b.id !== backupId);
             await this.saveMetadata(metadata);
@@ -1123,13 +976,26 @@ class BackupManager {
 
         // Database configuration - collect password storage promises to await them all
         if (backupData.sources) {
-            const dbSources = backupData.sources.filter(s => s.type !== 'local');
+            const dbSources = backupData.sources.filter(s => s.type !== 'local' && s.type !== 'git_repos');
+            const gitSources = backupData.sources.filter(s => s.type === 'git_repos');
             const passwordPromises = [];
+            const dumpBaseDir = await this._getDumpBaseDir();
             for (let i = 0; i < dbSources.length; i++) {
                 const dbSource = dbSources[i];
-                const promise = this.addDatabaseConfig(config, dbSource, { backupId: backupData.id, dbIndex: i });
+                const promise = this.addDatabaseConfig(config, dbSource, { backupId: backupData.id, dbIndex: i, dumpBaseDir });
                 if (promise) passwordPromises.push(promise);
             }
+
+            // Git repository sources
+            for (let i = 0; i < gitSources.length; i++) {
+                const promise = this.addGitReposConfig(config, gitSources[i], {
+                    backupId: backupData.id,
+                    gitIndex: i,
+                    backupName: backupData.name,
+                });
+                if (promise) passwordPromises.push(promise);
+            }
+
             // Wait for all password storage operations to complete
             if (passwordPromises.length > 0) {
                 await Promise.all(passwordPromises);
@@ -1204,6 +1070,7 @@ class BackupManager {
     addDatabaseConfig(config, dbSource, opts = {}) {
         const backupId = opts.backupId || 'unknown';
         const dbIndex = Number.isInteger(opts.dbIndex) ? opts.dbIndex : 0;
+        const dumpBaseDir = opts.dumpBaseDir || '/tmp';
 
         // If a plaintext password is provided, store it in password-manager and replace with env placeholder.
         // This prevents secrets from being written to borgmatic YAML (which is commonly exported/backed up/viewed).
@@ -1272,7 +1139,7 @@ class BackupManager {
             // Default: dump to temp directory via command hooks (reliable with all repo types)
             const safeBackup = String(backupId || 'unknown').replace(/[^A-Za-z0-9_]/g, '_');
             const safeHost = String(dbSource.is_host_database ? 'host' : (dbSource.hostname || 'localhost')).replace(/[^A-Za-z0-9_.-]/g, '_');
-            const tempDir = `/tmp/borgmatic_db_dumps_${safeBackup}_${dbSource.type}_${dbIndex}_${safeHost}`;
+            const tempDir = `${dumpBaseDir}/borgmatic_db_dumps_${safeBackup}_${dbSource.type}_${dbIndex}_${safeHost}`;
             const passEnvVar = (typeof passwordValue === 'string' && passwordValue.startsWith('${'))
                 ? passwordValue.slice(2, -1)
                 : null;
@@ -1314,7 +1181,7 @@ class BackupManager {
                     break;
                 case 'mssql': {
                     const safeBackup = String(backupId || 'unknown').replace(/[^A-Za-z0-9_]/g, '_');
-                    const mssqlTempDir = `/tmp/borgmatic_mssql_dumps_${safeBackup}_${dbIndex}`;
+                    const mssqlTempDir = `${dumpBaseDir}/borgmatic_mssql_dumps_${safeBackup}_${dbIndex}`;
                     const mssqlPassEnvVar = (typeof passwordValue === 'string' && passwordValue.startsWith('${'))
                         ? passwordValue.slice(2, -1)
                         : null;
@@ -1351,269 +1218,213 @@ class BackupManager {
     }
 
     /**
-     * Generate MSSQL dump script for before_backup hook
-     * Uses sqlpackage to export databases as .bacpac files (client-side export)
-     * This streams data over the network to local storage, unlike sqlcmd BACKUP
-     * which writes files on the SQL Server side.
+     * Add a Git repository backup source.
+     * Writes persistent job.yml and keys.yml to the config directory,
+     * adds the user-chosen target directory to source_directories,
+     * and creates a before-action hook to run repos.sh.
      */
-    generateMssqlDumpScript(dbSource, passEnvVar, tempDir) {
-        const validated = this._validateMssqlInputs(dbSource);
-        const hostname = validated.host;
-        const port = validated.port;
-        const authMethod = validated.auth_method;
+    async addGitReposConfig(config, source, opts = {}) {
+        const backupId = opts.backupId || 'unknown';
+        const gitIndex = Number.isInteger(opts.gitIndex) ? opts.gitIndex : 0;
+        const backupName = opts.backupName || backupId;
 
-        // Build server string for sqlpackage: "host,port" or "host,port\instance"
-        const serverName = validated.instance
-            ? `${hostname},${port}\\\\${validated.instance}`
-            : `${hostname},${port}`;
+        const safeBackup = String(backupId).replace(/[^A-Za-z0-9_]/g, '_');
+        const jobFileName = `git-job-${safeBackup}-${gitIndex}.yml`;
+        const keysFileName = `git-keys-${safeBackup}-${gitIndex}.yml`;
+        const jobFilePath = path.join(this.backupsDir, jobFileName);
+        const keysFilePath = path.join(this.backupsDir, keysFileName);
 
-        // Build server string for sqlcmd (used for listing databases in "all" mode)
-        const sqlcmdServer = validated.instance
-            ? `${hostname},${port}\\\\${validated.instance}`
-            : `${hostname},${port}`;
-
-        // sqlpackage encryption parameters
-        const encryptValue = validated.encrypt === 'true' ? 'True' 
-            : validated.encrypt === 'false' ? 'False' 
-            : 'Strict';
-        const trustCertValue = dbSource.trustServerCert ? 'True' : 'False';
-
-        // sqlcmd flags for listing databases (in "all" mode)
-        const sqlcmdEncryptMode = validated.encrypt === 'false' ? 'disable' : validated.encrypt;
-        const sqlcmdEncryptFlag = `-N ${sqlcmdEncryptMode}`;
-        const sqlcmdTrustCert = dbSource.trustServerCert ? '-C' : '';
-
-        // Build password reference (use env var if available, otherwise direct value)
-        const passwordRef = passEnvVar ? `\${${passEnvVar}}` : String(dbSource.password || '');
-        const passwordRefQuoted = passEnvVar ? `"\${${passEnvVar}}"` : `"${String(dbSource.password || '')}"`;
-
-        // Build auth-specific sqlcmd args for database listing
-        let sqlcmdAuthArgs;
-        if (authMethod === 'ad_password') {
-            sqlcmdAuthArgs = `--authentication-method ActiveDirectoryPassword -U "${validated.user}" -P ${passwordRefQuoted}`;
-        } else if (authMethod === 'service_principal') {
-            sqlcmdAuthArgs = `--authentication-method ActiveDirectoryServicePrincipal -U "${validated.client_id}" -P ${passwordRefQuoted} --tenant-id "${validated.tenant_id}"`;
-        } else {
-            sqlcmdAuthArgs = `-U "${validated.user}" -P ${passwordRefQuoted}`;
+        const targetDir = String(source.target_dir || '').trim();
+        if (!targetDir || !targetDir.startsWith('/')) {
+            throw new Error('Git repo backup requires an absolute target directory path');
         }
 
-        // Build sqlpackage auth args: use /scs: (SourceConnectionString) for AD auth
-        let sqlpackageAuthArgs;
-        if (authMethod === 'ad_password') {
-            const connStr = `Server=tcp:${serverName};Authentication=Active Directory Password;User ID=${validated.user};Encrypt=${encryptValue};TrustServerCertificate=${trustCertValue}`;
-            sqlpackageAuthArgs = { useConnectionString: true, connStrTemplate: connStr };
-        } else if (authMethod === 'service_principal') {
-            const connStr = `Server=tcp:${serverName};Authentication=Active Directory Service Principal;User ID=${validated.client_id};Encrypt=${encryptValue};TrustServerCertificate=${trustCertValue}`;
-            sqlpackageAuthArgs = { useConnectionString: true, connStrTemplate: connStr };
-        } else {
-            sqlpackageAuthArgs = { useConnectionString: false };
+        config.source_directories = config.source_directories || [];
+        if (!config.source_directories.includes(targetDir)) {
+            config.source_directories.push(targetDir);
         }
 
-        // Resolver for sqlcmd binary (used for listing databases)
-        const sqlcmdResolver = `SQLCMD_BIN="$(command -v sqlcmd || true)"; if [ -z "$SQLCMD_BIN" ]; then if [ -x /opt/mssql-tools18/bin/sqlcmd ]; then SQLCMD_BIN=/opt/mssql-tools18/bin/sqlcmd; elif [ -x /opt/mssql-tools/bin/sqlcmd ]; then SQLCMD_BIN=/opt/mssql-tools/bin/sqlcmd; else echo "sqlcmd not found"; exit 1; fi; fi`;
+        // Handle "both" mode: mirror + clone into separate dirs
+        const targetDirClone = source.backup_type === 'both' ? String(source.target_dir_clone || '').trim() : null;
+        if (targetDirClone && targetDirClone.startsWith('/') && !config.source_directories.includes(targetDirClone)) {
+            config.source_directories.push(targetDirClone);
+        }
 
-        // Resolver for sqlpackage binary (standalone zip on x64, dotnet tool on ARM64)
-        const sqlpackageResolver = `SQLPACKAGE_BIN="$(command -v sqlpackage || true)"; if [ -z "$SQLPACKAGE_BIN" ]; then if [ -x /opt/sqlpackage/sqlpackage ]; then SQLPACKAGE_BIN=/opt/sqlpackage/sqlpackage; elif [ -x /opt/dotnet-cli/.dotnet/tools/sqlpackage ]; then SQLPACKAGE_BIN=/opt/dotnet-cli/.dotnet/tools/sqlpackage; else echo "sqlpackage not found"; exit 1; fi; fi`;
+        // Build the job YAML content
+        const buildJobYaml = (backupType, tDir) => {
+            const jobObj = {
+                jobName: `${backupName}-git-${gitIndex}`,
+                platform: source.platform || 'github',
+                backupType: backupType,
+                keysFile: keysFilePath,
+                backup: { targetDir: tDir },
+                options: {
+                    groupByProject: source.group_by_project !== false,
+                    prune: source.prune !== false,
+                },
+            };
 
-        // Metadata for round-trip config extraction
-        const metadata = {
-            type: 'mssql',
-            database_name: validated.dbName,
-            hostname,
-            port,
-            username: validated.user,
-            instance: validated.instance,
-            encrypt: validated.encrypt,
-            trustServerCert: !!dbSource.trustServerCert,
-            is_host_database: !!dbSource.is_host_database,
-            auth_method: authMethod,
-            client_id: validated.client_id || undefined,
-            tenant_id: validated.tenant_id || undefined,
-        };
-        const metadataB64 = Buffer.from(JSON.stringify(metadata), 'utf8').toString('base64');
-
-        // Helper: build sqlpackage export command for a database.
-        // dbNameQuoted is a shell-quoted reference (e.g. '"$db"' or '"MyDB"').
-        // dbNameRaw is unquoted (e.g. '$db' or 'MyDB') for embedding inside a connection string.
-        const buildSqlpackageCmd = (dbNameQuoted, dbNameRaw, targetFileRef) => {
-            if (sqlpackageAuthArgs.useConnectionString) {
-                return `"$SQLPACKAGE_BIN" /Action:Export \\
-        /scs:"${sqlpackageAuthArgs.connStrTemplate};Password=\\"$DB_PASS_ESC\\";Initial Catalog=${dbNameRaw}" \\
-        /TargetFile:${targetFileRef}`;
+            // Repo selection filter
+            if (source.scope === 'single_repo' && source.repo_name) {
+                const owner = source.organization || source.group || source.workspace || source.user;
+                jobObj.selectedRepos = [owner ? `${owner}/${source.repo_name}` : source.repo_name];
+            } else if (source.repo_selection === 'selected' && Array.isArray(source.selected_repos) && source.selected_repos.length > 0) {
+                jobObj.selectedRepos = source.selected_repos;
             }
-            return `"$SQLPACKAGE_BIN" /Action:Export \\
-        /SourceServerName:"${serverName}" \\
-        /SourceDatabaseName:${dbNameQuoted} \\
-        /SourceUser:"${validated.user}" \\
-        /SourcePassword:"${passwordRef}" \\
-        /SourceTrustServerCertificate:${trustCertValue} \\
-        /SourceEncryptConnection:${encryptValue} \\
-        /TargetFile:${targetFileRef}`;
+
+            // Platform-specific settings
+            switch (source.platform) {
+                case 'github':
+                    jobObj.github = {};
+                    if (source.organization) jobObj.github.organization = source.organization;
+                    if (source.user) jobObj.github.user = source.user;
+                    if (source.include_private !== undefined) jobObj.github.includePrivate = source.include_private;
+                    if (source.include_forks !== undefined) jobObj.github.includeForks = source.include_forks;
+                    break;
+                case 'gitlab':
+                    jobObj.gitlab = {
+                        host: source.host || 'https://gitlab.com',
+                    };
+                    if (source.group) jobObj.gitlab.group = source.group;
+                    if (source.user) jobObj.gitlab.user = source.user;
+                    if (source.include_archived !== undefined) jobObj.gitlab.includeArchived = source.include_archived;
+                    if (source.include_subgroups !== undefined) jobObj.gitlab.includeSubgroups = source.include_subgroups;
+                    break;
+                case 'bitbucket':
+                    jobObj.bitbucket = {};
+                    if (source.workspace) jobObj.bitbucket.workspace = source.workspace;
+                    if (source.project) jobObj.bitbucket.project = source.project;
+                    break;
+                case 'azure':
+                    jobObj.azure = {};
+                    if (source.organization) jobObj.azure.organization = source.organization;
+                    if (source.project) jobObj.azure.project = source.project;
+                    if (source.repo_type) jobObj.repoType = source.repo_type;
+                    break;
+            }
+
+            return yaml.dump(jobObj, { lineWidth: -1 });
         };
 
-        // DB_PASS assignment used in connection string templates
-        const dbPassLine = `DB_PASS="${passwordRef}"`;
-        const dbPassEscLine = `DB_PASS_ESC="$(printf '%s' "$DB_PASS" | sed 's/"/""/g')"`;
+        // Store credentials via password-manager
+        let storagePromise = null;
+        const patValue = source.pat || '';
+        const bbAppPassword = source.bb_app_password || '';
+        const credentialValue = patValue || bbAppPassword;
 
-        // For "all" databases, query with sqlcmd then export each with sqlpackage
-        if (validated.dbName === 'all') {
-            return `#!/bin/sh
-# MSSQL export script - all user databases (using sqlpackage)
-set -eu
-# BORGMATIC_UI_MSSQL_META_B64:${metadataB64}
-${dbPassLine}
-${sqlpackageAuthArgs.useConnectionString ? dbPassEscLine : ''}
-${sqlcmdResolver}
-${sqlpackageResolver}
-mkdir -p "${tempDir}"
-echo "Listing MSSQL databases..."
-"$SQLCMD_BIN" -S "${sqlcmdServer}" ${sqlcmdAuthArgs} ${sqlcmdEncryptFlag} ${sqlcmdTrustCert} -b -r 1 -h -1 -W -Q "SET NOCOUNT ON; SELECT name FROM sys.databases WHERE database_id > 4 AND state = 0 AND name NOT IN ('master','tempdb','model','msdb')" | while IFS= read -r db; do
-    [ -z "$db" ] && continue
-    if ! printf '%s' "$db" | grep -Eq '^[A-Za-z0-9_-]+$'; then
-        echo "Skipping MSSQL database with unsupported name: $db"
-        continue
-    fi
-    echo "Exporting MSSQL database: $db"
-    ${buildSqlpackageCmd('"$db"', '$db', `"${tempDir}/$db.bacpac"`)}
-done`;
+        const patEnvVar = `BORGMATIC_UI_GIT_PAT_${safeBackup}_${gitIndex}`;
+
+        if (typeof credentialValue === 'string' && credentialValue.length > 0) {
+            const looksLikePlaceholder = /^\$\{BORGMATIC_UI_GIT_PAT_[A-Za-z0-9_]+\}$/.test(credentialValue);
+            if (!looksLikePlaceholder) {
+                const passwordManager = require('./password-manager');
+                storagePromise = passwordManager.storeDatabaseCredentials(patEnvVar, 'git_repos', {
+                    password: credentialValue,
+                    hostname: source.platform,
+                    username: source.bb_username || source.organization || source.user || source.group || '',
+                }).catch((e) => {
+                    console.warn(`⚠️ Could not store Git PAT for ${patEnvVar}:`, e.message);
+                });
+            }
         }
 
-        // Single database export
-        return `#!/bin/sh
-# MSSQL export script - single database: ${validated.dbName} (using sqlpackage)
+        // Write job YAML (mirror, or first file for "both")
+        const primaryType = source.backup_type === 'both' ? 'mirror' : (source.backup_type || 'mirror');
+        await fs.outputFile(jobFilePath, buildJobYaml(primaryType, targetDir));
+
+        // For "both" mode, write a second job YAML for clone
+        let cloneJobFilePath = null;
+        if (source.backup_type === 'both' && targetDirClone) {
+            cloneJobFilePath = path.join(this.backupsDir, `git-job-${safeBackup}-${gitIndex}-clone.yml`);
+            await fs.outputFile(cloneJobFilePath, buildJobYaml('clone', targetDirClone));
+        }
+
+        // Write a placeholder keys YAML (the hook script injects the real PAT at runtime)
+        await fs.outputFile(keysFilePath, yaml.dump({
+            pat: 'RUNTIME_INJECTED',
+            username: source.bb_username || '',
+            appPassword: 'RUNTIME_INJECTED',
+        }));
+
+        // Build metadata for round-trip extraction
+        const metadata = {
+            type: 'git_repos',
+            platform: source.platform,
+            scope: source.scope || 'organization',
+            backup_type: source.backup_type || 'mirror',
+            target_dir: targetDir,
+            target_dir_clone: targetDirClone || undefined,
+            organization: source.organization || undefined,
+            user: source.user || undefined,
+            group: source.group || undefined,
+            workspace: source.workspace || undefined,
+            project: source.project || undefined,
+            host: source.host || undefined,
+            repo_selection: source.repo_selection || 'all',
+            selected_repos: source.selected_repos || undefined,
+            repo_name: source.repo_name || undefined,
+            bb_username: source.bb_username || undefined,
+            include_private: source.include_private,
+            include_forks: source.include_forks,
+            include_archived: source.include_archived,
+            include_subgroups: source.include_subgroups,
+            group_by_project: source.group_by_project,
+            prune: source.prune,
+            repo_type: source.repo_type || undefined,
+            pat_env_var: patEnvVar,
+        };
+        const metadataB64 = Buffer.from(JSON.stringify(metadata)).toString('base64');
+
+        // Resolve repos.sh location (Docker first, then local dev tree)
+        const reposShCandidates = [
+            '/app/scripts/repos.sh',
+            path.resolve(__dirname, '../../../scripts/repos.sh'),
+        ];
+        const reposSh = reposShCandidates.find((p) => fs.existsSync(p)) || '/app/scripts/repos.sh';
+        const reposShQ = this._shellSingleQuote(reposSh);
+        const jobFilePathQ = this._shellSingleQuote(jobFilePath);
+        const keysFilePathQ = this._shellSingleQuote(keysFilePath);
+
+        let hookScript = `#!/bin/sh
 set -eu
-# BORGMATIC_UI_MSSQL_META_B64:${metadataB64}
-${dbPassLine}
-${sqlpackageAuthArgs.useConnectionString ? dbPassEscLine : ''}
-${sqlpackageResolver}
-mkdir -p "${tempDir}"
-echo "Exporting MSSQL database: ${validated.dbName}"
-${buildSqlpackageCmd(`"${validated.dbName}"`, validated.dbName, `"${tempDir}/${validated.dbName}.bacpac"`)}`;
+# BORGMATIC_UI_GIT_META_B64:${metadataB64}
+GIT_PAT="$(printenv ${patEnvVar} 2>/dev/null || true)"
+BB_USER=${this._shellSingleQuote(source.bb_username || '')}
+BB_APP_PASS="$(printenv ${patEnvVar} 2>/dev/null || true)"
+KEYS_FILE=${keysFilePathQ}
+REPOS_SH=${reposShQ}
+cleanup_keys() {
+  printf 'pat: ""\\nusername: ""\\nappPassword: ""\\n' > "$KEYS_FILE" 2>/dev/null || true
+}
+trap cleanup_keys EXIT INT TERM
+printf 'pat: "%s"\\nusername: "%s"\\nappPassword: "%s"\\n' "$GIT_PAT" "$BB_USER" "$BB_APP_PASS" > "$KEYS_FILE"
+"$REPOS_SH" --job=${jobFilePathQ} --backup --yes`;
+
+        if (source.backup_type === 'both' && cloneJobFilePath) {
+            const cloneJobPathQ = this._shellSingleQuote(cloneJobFilePath);
+            hookScript += `\n"$REPOS_SH" --job=${cloneJobPathQ} --backup --yes`;
+        }
+
+        this._appendCommandHook(config, {
+            before: 'action',
+            when: ['create'],
+            run: [hookScript],
+        });
+
+        return storagePromise;
     }
 
-    /**
-     * Generate a database dump script for MariaDB, MySQL, PostgreSQL, or MongoDB.
-     * Dumps to a temp directory which gets included in source_directories.
-     * This avoids borgmatic's internal FIFO/streaming mechanism which has JSON
-     * parsing bugs with SSH warnings from remote repositories.
-     */
+    // Delegated to db-script-generators.js
+    generateMssqlDumpScript(dbSource, passEnvVar, tempDir) {
+        return dbGen.generateMssqlDumpScript(dbSource, passEnvVar, tempDir);
+    }
+
     generateDbDumpScript(dbSource, passEnvVar, tempDir) {
-        const validated = this._validateHookDbInputs(dbSource);
-        const hostname = validated.host;
-        const port = validated.port;
-        const username = validated.user;
-        const dbName = validated.dbName;
-        const authDb = validated.authDb;
-        const hasEnvVar = typeof passEnvVar === 'string' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(passEnvVar);
-        const passwordLiteral = hasEnvVar ? '' : String(dbSource.password || '');
-
-        const metadata = {
-            type: dbSource.type,
-            database_name: dbName,
-            hostname,
-            port,
-            username,
-            tls: dbSource.tls,
-            authentication_database: dbSource.authentication_database,
-            is_host_database: !!dbSource.is_host_database,
-            db_password_env_var: hasEnvVar ? passEnvVar : null,
-        };
-        const metadataB64 = Buffer.from(JSON.stringify(metadata), 'utf8').toString('base64');
-        const metadataComment = `# BORGMATIC_UI_DB_META_B64:${metadataB64}`;
-        const dbPassLine = hasEnvVar
-            ? `DB_PASS="\${${passEnvVar}:-}"`
-            : `DB_PASS=${this._shellSingleQuote(passwordLiteral)}`;
-        const hostQ = this._shellSingleQuote(hostname);
-        const userQ = this._shellSingleQuote(username);
-        const dbNameQ = this._shellSingleQuote(dbName);
-        const authDbQ = this._shellSingleQuote(authDb);
-        const tempDirQ = this._shellSingleQuote(tempDir);
-
-        switch (dbSource.type) {
-            case 'mariadb':
-            case 'mysql': {
-                const dumpCmd = dbSource.type === 'mariadb' ? 'mariadb-dump' : 'mysqldump';
-                const tlsFlag = dbSource.tls === false ? ' --skip-ssl' : '';
-                if (dbName === 'all') {
-                    return `#!/bin/sh
-${metadataComment}
-set -eu
-${dbPassLine}
-mkdir -p ${tempDirQ}
-echo "Dumping all ${dbSource.type} databases from ${hostname}:${port}..."
-MYSQL_PWD="$DB_PASS" ${dumpCmd} -h ${hostQ} -P ${port} -u ${userQ} --single-transaction --all-databases${tlsFlag} > ${tempDirQ}/all-databases.sql
-echo "Database dump completed: ${tempDir}/all-databases.sql"`;
-                }
-                return `#!/bin/sh
-${metadataComment}
-set -eu
-${dbPassLine}
-mkdir -p ${tempDirQ}
-echo "Dumping ${dbSource.type} database '${dbName}' from ${hostname}:${port}..."
-MYSQL_PWD="$DB_PASS" ${dumpCmd} -h ${hostQ} -P ${port} -u ${userQ} --single-transaction --databases ${dbNameQ}${tlsFlag} > ${tempDirQ}/${dbNameQ}.sql
-echo "Database dump completed: ${tempDir}/${dbName}.sql"`;
-            }
-
-            case 'postgresql': {
-                const pgpassLineQ = this._shellSingleQuote(`${hostname}:${port}:*:${username}:`);
-                if (dbName === 'all') {
-                    return `#!/bin/sh
-${metadataComment}
-set -eu
-${dbPassLine}
-mkdir -p ${tempDirQ}
-export PGPASSFILE="$(mktemp)"
-trap 'rm -f "$PGPASSFILE"' EXIT
-printf "%s%s\\n" ${pgpassLineQ} "$DB_PASS" > "$PGPASSFILE"
-chmod 600 "$PGPASSFILE"
-echo "Dumping all PostgreSQL databases from ${hostname}:${port}..."
-pg_dumpall -h ${hostQ} -p ${port} -U ${userQ} -f ${tempDirQ}/all-databases.sql
-echo "Database dump completed: ${tempDir}/all-databases.sql"`;
-                }
-                return `#!/bin/sh
-${metadataComment}
-set -eu
-${dbPassLine}
-mkdir -p ${tempDirQ}
-export PGPASSFILE="$(mktemp)"
-trap 'rm -f "$PGPASSFILE"' EXIT
-printf "%s%s\\n" ${pgpassLineQ} "$DB_PASS" > "$PGPASSFILE"
-chmod 600 "$PGPASSFILE"
-echo "Dumping PostgreSQL database '${dbName}' from ${hostname}:${port}..."
-pg_dump -h ${hostQ} -p ${port} -U ${userQ} -d ${dbNameQ} -Fc -f ${tempDirQ}/${dbNameQ}.dump
-echo "Database dump completed: ${tempDir}/${dbName}.dump"`;
-            }
-
-            case 'mongodb': {
-                const authPart = username ? ` --username=${userQ} --password="$DB_PASS" --authenticationDatabase=${authDbQ}` : '';
-                if (dbName === 'all') {
-                    return `#!/bin/sh
-${metadataComment}
-set -eu
-${dbPassLine}
-mkdir -p ${tempDirQ}
-echo "Dumping all MongoDB databases from ${hostname}:${port}..."
-mongodump --host=${hostQ} --port=${port}${authPart} --archive=${tempDirQ}/all-databases.archive
-echo "Database dump completed: ${tempDir}/all-databases.archive"`;
-                }
-                return `#!/bin/sh
-${metadataComment}
-set -eu
-${dbPassLine}
-mkdir -p ${tempDirQ}
-echo "Dumping MongoDB database '${dbName}' from ${hostname}:${port}..."
-mongodump --host=${hostQ} --port=${port} --db=${dbNameQ}${authPart} --archive=${tempDirQ}/${dbNameQ}.archive
-echo "Database dump completed: ${tempDir}/${dbName}.archive"`;
-            }
-
-            default:
-                throw new Error(`Unsupported database type for dump script: ${dbSource.type}`);
-        }
+        return dbGen.generateDbDumpScript(dbSource, passEnvVar, tempDir);
     }
 
     _getDefaultPort(dbType) {
-        const defaults = { postgresql: 5432, mysql: 3306, mariadb: 3306, mongodb: 27017, mssql: 1433 };
-        return defaults[dbType] || 5432;
+        return dbGen.getDefaultPort(dbType);
     }
 
     /**
@@ -1636,98 +1447,8 @@ echo "Database dump completed: ${tempDir}/${dbName}.archive"`;
      * Extract sources from existing config
      * Handles both old sectioned format (location:) and new flat format
      */
-    extractSourcesFromConfig(config) {
-        const sources = [];
-        
-        // Extract local sources (handle both old and new format)
-        const sourceDirs = config.source_directories || config.location?.source_directories || [];
-        for (const dir of sourceDirs) {
-            if (this._isDumpTempPath(dir)) continue;
-            sources.push({ type: 'local', path: dir });
-        }
-        
-        // Extract PostgreSQL databases (native borgmatic hooks)
-        if (config.postgresql_databases) {
-            for (const db of config.postgresql_databases) {
-                sources.push({
-                    type: 'postgresql',
-                    database_name: db.name,
-                    hostname: db.hostname,
-                    port: db.port,
-                    username: db.username,
-                    password: db.password,
-                    dump_method: 'native',
-                });
-            }
-        }
-        
-        // Extract MySQL databases (native borgmatic hooks)
-        if (config.mysql_databases) {
-            for (const db of config.mysql_databases) {
-                sources.push({
-                    type: 'mysql',
-                    database_name: db.name,
-                    hostname: db.hostname,
-                    port: db.port,
-                    username: db.username,
-                    password: db.password,
-                    tls: db.tls,
-                    dump_method: 'native',
-                });
-            }
-        }
-        
-        // Extract MariaDB databases (native borgmatic hooks)
-        if (config.mariadb_databases) {
-            for (const db of config.mariadb_databases) {
-                sources.push({
-                    type: 'mariadb',
-                    database_name: db.name,
-                    hostname: db.hostname,
-                    port: db.port,
-                    username: db.username,
-                    password: db.password,
-                    tls: db.tls,
-                    dump_method: 'native',
-                });
-            }
-        }
-        
-        // Extract MongoDB databases (native borgmatic hooks)
-        if (config.mongodb_databases) {
-            for (const db of config.mongodb_databases) {
-                sources.push({
-                    type: 'mongodb',
-                    database_name: db.name,
-                    hostname: db.hostname,
-                    port: db.port,
-                    username: db.username,
-                    password: db.password,
-                    authentication_database: db.authentication_database,
-                    dump_method: 'native',
-                });
-            }
-        }
-        
-        // Extract SQLite databases
-        if (config.sqlite_databases) {
-            for (const db of config.sqlite_databases) {
-                sources.push({
-                    type: 'sqlite',
-                    database_name: db.name,
-                    path: db.path
-                });
-            }
-        }
-
-        // Extract MSSQL databases from generated hook metadata markers
-        sources.push(...this._extractMssqlSourcesFromHooks(config));
-
-        // Extract MariaDB/MySQL/PostgreSQL/MongoDB from command-hook dump scripts
-        sources.push(...this._extractDbDumpSourcesFromHooks(config));
-        
-        return sources;
-    }
+    // Delegated to hook-extractors.js
+    extractSourcesFromConfig(config) { return hookEx.extractSourcesFromConfig(config); }
 
     /**
      * Preserve existing DB password placeholders when user-provided source has no password.
@@ -1737,8 +1458,7 @@ echo "Database dump completed: ${tempDir}/${dbName}.archive"`;
         const existingDb = (existingSources || []).filter(s => s.type && s.type !== 'local');
         return (newSources || []).map((s) => {
             if (!s || !s.type || s.type === 'local') return s;
-            // SQLite has no password
-            if (s.type === 'sqlite') return s;
+            if (s.type === 'sqlite' || s.type === 'git_repos') return s;
 
             const hasPassword = typeof s.password === 'string' && s.password.trim().length > 0;
             if (hasPassword) return s;
@@ -1864,106 +1584,9 @@ ${metadata.schedule_id ? `# Schedule ID: ${metadata.schedule_id}\n` : ''}
         }
     }
 
-    /**
-     * Get sources summary for UI display
-     * Handles both old sectioned format (location:) and new flat format
-     */
-    getSourcesSummary(config) {
-        const sources = [];
-        
-        // Local directories (handle both formats)
-        const sourceDirs = config.source_directories || config.location?.source_directories || [];
-        sources.push(...sourceDirs.map(dir => ({
-            type: 'local',
-            path: dir
-        })).filter((s) => !this._isDumpTempPath(s.path)));
-
-        // Native borgmatic database hooks (FIFO/streaming) - dump_method: 'native'
-        ['postgresql', 'mysql', 'mariadb', 'mongodb', 'sqlite'].forEach(dbType => {
-            const dbKey = `${dbType}_databases`;
-            if (config[dbKey]) {
-                config[dbKey].forEach(db => {
-                    const isHostDatabase = db.hostname === 'host.docker.internal';
-                    const connection_type = dbType === 'sqlite' ? 'file' : (isHostDatabase ? 'host' : 'network');
-                    
-                    sources.push({
-                        type: dbType,
-                        database_type: dbType,
-                        database_name: db.name,
-                        hostname: db.hostname,
-                        port: db.port,
-                        username: db.username,
-                        password: undefined,
-                        tls: db.tls,
-                        path: db.path,
-                        is_host_database: isHostDatabase,
-                        connection_type,
-                        dump_method: dbType === 'sqlite' ? undefined : 'native',
-                    });
-                });
-            }
-        });
-
-        // Hook-based DB dumps (dump-to-file) - dump_method: 'local'
-        const dbDumpSources = this._extractDbDumpSourcesFromHooks(config).map((db) => ({
-            type: db.type,
-            database_type: db.type,
-            database_name: db.database_name,
-            hostname: db.hostname,
-            port: db.port,
-            username: db.username,
-            password: undefined,
-            tls: db.tls,
-            is_host_database: !!db.is_host_database,
-            connection_type: db.is_host_database ? 'host' : 'network',
-            dump_method: 'local',
-        }));
-        sources.push(...dbDumpSources);
-
-        // MSSQL is always hook-based
-        const mssqlSources = this._extractMssqlSourcesFromHooks(config).map((db) => {
-            const src = {
-                type: 'mssql',
-                database_type: 'mssql',
-                database_name: db.database_name,
-                hostname: db.hostname,
-                port: db.port,
-                username: db.username,
-                password: undefined,
-                instance: db.instance || '',
-                encrypt: db.encrypt || 'true',
-                trustServerCert: !!db.trustServerCert,
-                is_host_database: !!db.is_host_database,
-                connection_type: db.is_host_database ? 'host' : 'network',
-                auth_method: db.auth_method || 'sql',
-            };
-            if (db.client_id) src.client_id = db.client_id;
-            if (db.tenant_id) src.tenant_id = db.tenant_id;
-            return src;
-        });
-        sources.push(...mssqlSources);
-
-        return sources;
-    }
-
-    /**
-     * Get repositories summary for UI display
-     * Handles both old sectioned format (location:) and new flat format
-     */
-    getRepositoriesSummary(config, allRepos = []) {
-        const repos = config.repositories || config.location?.repositories || [];
-        if (!repos.length) return [];
-        
-        return repos.map(repo => {
-            // Try to find matching repo from all repos to get borg_version
-            const matchedRepo = allRepos.find(r => r.path === repo.path);
-            return {
-                path: repo.path,
-                label: repo.label,
-                borg_version: matchedRepo?.borg_version || repo.borg_version || null
-            };
-        });
-    }
+    // Delegated to hook-extractors.js
+    getSourcesSummary(config) { return hookEx.getSourcesSummary(config); }
+    getRepositoriesSummary(config, allRepos = []) { return hookEx.getRepositoriesSummary(config, allRepos); }
 }
 
 module.exports = new BackupManager();

@@ -533,6 +533,7 @@ export const settingsAPI = {
 
   // System maintenance
   cleanupSystem: () => api.post('/settings/system/cleanup'),
+  testDumpDir: (dir: string) => api.post('/settings/system/test-dump-dir', { dir }),
 
   // Archive cache (Redis)
   getCacheStatus: () => api.get('/settings/cache'),
@@ -743,6 +744,48 @@ export const databaseDiscoveryAPI = {
     client_id?: string;
     tenant_id?: string;
   }) => api.post('/database-discovery/test-connection', params),
+
+  checkTools: (dbType: string) => api.get(`/database-discovery/tool-check/${dbType}`),
+}
+
+// Git Repos API
+export const gitReposAPI = {
+  discoverRepos: (params: {
+    platform: string;
+    organization?: string;
+    user?: string;
+    group?: string;
+    workspace?: string;
+    project?: string;
+    host?: string;
+    pat?: string;
+    bb_username?: string;
+    bb_app_password?: string;
+    include_private?: boolean;
+    include_forks?: boolean;
+    include_archived?: boolean;
+    include_subgroups?: boolean;
+    repo_type?: string;
+  }) => api.post('/git-repos/discover-repos', params),
+
+  testConnection: (params: {
+    platform: string;
+    organization?: string;
+    user?: string;
+    group?: string;
+    workspace?: string;
+    project?: string;
+    host?: string;
+    pat?: string;
+    bb_username?: string;
+    bb_app_password?: string;
+    repo_name?: string;
+    include_private?: boolean;
+    include_forks?: boolean;
+    include_archived?: boolean;
+    include_subgroups?: boolean;
+    repo_type?: string;
+  }) => api.post('/git-repos/test-connection', params),
 }
 
 // Filesystem API

@@ -4,25 +4,27 @@
  */
 function expandCronField(field: string, min: number, max: number): number[] {
   const values = new Set<number>();
+  const normalize = (v: number) => (min === 0 && max === 6 && v === 7 ? 0 : v);
+
   for (const part of field.split(',')) {
     if (part === '*') {
       for (let i = min; i <= max; i++) values.add(i);
     } else if (part.startsWith('*/')) {
       const step = parseInt(part.slice(2));
       if (isNaN(step) || step <= 0) continue;
-      for (let i = min; i <= max; i += step) values.add(i);
+      for (let i = min; i <= max; i += step) values.add(normalize(i));
     } else if (part.includes('-')) {
       const [rangePart, stepPart] = part.split('/');
       const [lo, hi] = rangePart.split('-').map(Number);
       const step = stepPart ? parseInt(stepPart) : 1;
       if (isNaN(lo) || isNaN(hi) || isNaN(step)) continue;
-      for (let i = lo; i <= hi; i += step) values.add(i);
+      for (let i = lo; i <= hi; i += step) values.add(normalize(i));
     } else {
       const v = parseInt(part);
-      if (!isNaN(v)) values.add(v);
+      if (!isNaN(v)) values.add(normalize(v));
     }
   }
-  return [...values].sort((a, b) => a - b);
+  return [...values].filter(v => v >= min && v <= max).sort((a, b) => a - b);
 }
 
 /**
@@ -56,12 +58,24 @@ export function calculateNextRun(cronExpression: string): string {
       const mon = candidate.getMonth() + 1;
       const dow = candidate.getDay();
 
+      const domIsWildcard = parts[2] === '*';
+      const dowIsWildcard = parts[4] === '*';
+      const domMatch = daysOfMonth.includes(dom);
+      const dowMatch = daysOfWeek.includes(dow);
+      const dayMatch =
+        domIsWildcard && dowIsWildcard
+          ? true
+          : domIsWildcard
+            ? dowMatch
+            : dowIsWildcard
+              ? domMatch
+              : (domMatch || dowMatch);
+
       if (
         minutes.includes(m) &&
         hours.includes(h) &&
-        (parts[2] === '*' || daysOfMonth.includes(dom)) &&
         (parts[3] === '*' || months.includes(mon)) &&
-        (parts[4] === '*' || daysOfWeek.includes(dow))
+        dayMatch
       ) {
         const diff = candidate.getTime() - now.getTime();
         const totalMin = Math.floor(diff / (1000 * 60));

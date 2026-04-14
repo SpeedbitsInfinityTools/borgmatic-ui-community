@@ -21,10 +21,13 @@ import {
   HardDrive,
   AlertCircle,
   CheckCircle2,
+  FlaskConical,
+  Loader2,
 } from 'lucide-react';
 import { settingsAPI } from '../services/api';
 import { toast } from 'react-hot-toast';
 import { useAuth } from '../hooks/useAuth';
+import PathSelectorField from '../components/PathSelectorField';
 import ModeSettings from '../components/ModeSettings';
 import ClientConfiguration from '../components/ClientConfiguration';
 import ConnectionConfiguration from '../components/ConnectionConfiguration';
@@ -41,6 +44,7 @@ interface SystemSettings {
   webhook_url: string;
   auto_cleanup: boolean;
   cleanup_retention_days: number;
+  dump_temp_dir: string;
   borgmatic_version: string;
   app_version: string;
 }
@@ -215,6 +219,21 @@ const Settings: React.FC = () => {
   const [passwordForm, setPasswordForm] = useState({
     new_password: '',
   });
+  const [dumpDirTest, setDumpDirTest] = useState<{
+    loading: boolean;
+    result: null | { path: string; exists: boolean; writable: boolean; free_space: number | null; error: string | null };
+  }>({ loading: false, result: null });
+
+  const handleTestDumpDir = async () => {
+    const dir = systemForm.dump_temp_dir || '/tmp';
+    setDumpDirTest({ loading: true, result: null });
+    try {
+      const res = await settingsAPI.testDumpDir(dir);
+      setDumpDirTest({ loading: false, result: res.data.results });
+    } catch (err: any) {
+      setDumpDirTest({ loading: false, result: { path: dir, exists: false, writable: false, free_space: null, error: err.response?.data?.detail || err.message } });
+    }
+  };
 
   // Initialize form when data loads
   React.useEffect(() => {
@@ -567,6 +586,61 @@ const Settings: React.FC = () => {
                       className="block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                       placeholder="https://example.com/webhook"
                     />
+                  </div>
+
+                  {/* Database Dump Directory */}
+                  <div className="pt-4 border-t border-gray-200">
+                    <h4 className="text-sm font-semibold text-gray-900 mb-1 flex items-center gap-1.5">
+                      <Database className="w-4 h-4" />
+                      Database Dump Directory
+                    </h4>
+                    <p className="text-xs text-gray-500 mb-3">
+                      When backing up databases (MariaDB, MySQL, PostgreSQL, MongoDB, MSSQL),
+                      borgmatic-ui first dumps them to a temporary directory, then includes the
+                      dump files in the Borg archive. Large databases can produce multi-GB dumps.
+                    </p>
+                    <div className="bg-blue-50 border border-blue-200 rounded-md p-3 mb-3 text-xs text-blue-800 space-y-1">
+                      <p><strong>Default:</strong> <code className="bg-white px-1 py-0.5 rounded">/tmp</code> (inside the container). This is fine for most setups.</p>
+                      <p><strong>When to change:</strong> If your databases are large (1 GB+), the container filesystem may run out of space. Mount an external volume (e.g. <code className="bg-white px-1 py-0.5 rounded">/mnt/db-dumps</code>) and set it here.</p>
+                      <p><strong>Cleanup:</strong> Dump files are automatically removed after each backup run and before the next run of the same job. No manual cleanup needed.</p>
+                      <p><strong>Changing at any time:</strong> You can update this path whenever you like. The new value applies when a backup job configuration is saved/updated. Existing jobs keep their current dump path until they are saved again.</p>
+                    </div>
+                    <PathSelectorField
+                      value={systemForm.dump_temp_dir || '/tmp'}
+                      onChange={(val) => { setSystemForm({ ...systemForm, dump_temp_dir: val }); setDumpDirTest({ loading: false, result: null }); }}
+                      placeholder="/tmp"
+                      selectMode="directories"
+                    />
+                    <div className="mt-2 flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={handleTestDumpDir}
+                        disabled={dumpDirTest.loading}
+                        className="inline-flex items-center px-3 py-1.5 text-xs font-medium rounded-md border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                      >
+                        {dumpDirTest.loading
+                          ? <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> Testing...</>
+                          : <><FlaskConical className="w-3.5 h-3.5 mr-1.5" /> Test Folder</>
+                        }
+                      </button>
+                      {dumpDirTest.result && !dumpDirTest.result.error && dumpDirTest.result.writable && (
+                        <span className="inline-flex items-center text-xs text-green-700 bg-green-50 border border-green-200 rounded-md px-2 py-1">
+                          <CheckCircle2 className="w-3.5 h-3.5 mr-1" />
+                          Writable
+                          {dumpDirTest.result.free_space != null && (
+                            <span className="ml-1.5 text-green-600">
+                              &mdash; {(dumpDirTest.result.free_space / (1024 * 1024 * 1024)).toFixed(1)} GB free
+                            </span>
+                          )}
+                        </span>
+                      )}
+                      {dumpDirTest.result && (dumpDirTest.result.error || !dumpDirTest.result.writable) && (
+                        <span className="inline-flex items-center text-xs text-red-700 bg-red-50 border border-red-200 rounded-md px-2 py-1">
+                          <AlertCircle className="w-3.5 h-3.5 mr-1" />
+                          {dumpDirTest.result.error || 'Directory is not writable'}
+                        </span>
+                      )}
+                    </div>
                   </div>
 
                   <button

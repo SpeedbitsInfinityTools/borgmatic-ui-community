@@ -119,7 +119,14 @@ RUN apk add --no-cache \
     icu-libs \
     # Database clients for borgmatic database hooks
     mariadb-client \
-    postgresql-client
+    postgresql-client \
+    # Git tools for repository backup feature
+    git \
+    jq \
+    py3-yaml
+
+# AWS CLI for IAM database authentication (RDS/Aurora token generation)
+RUN pip3 install --no-cache-dir --break-system-packages awscli
 
 # Copy the pre-compiled Borg packages from builder
 # Copy both Borg 1.x and Borg 2.x virtual environments

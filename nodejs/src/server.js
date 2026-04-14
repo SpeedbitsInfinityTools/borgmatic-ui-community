@@ -120,6 +120,7 @@ const databaseDiscoveryRoutes = require('./routes/database-discovery');
 const filesystemRoutes = require('./routes/filesystem');
 const scriptsRoutes = require('./routes/scripts');
 const configExportRoutes = require('./routes/config-export');
+const gitReposRoutes = require('./routes/git-repos');
 const { eventManager } = require('./routes/events');
 const monitoringIntegration = require('./services/monitoring-integration');
 
@@ -188,6 +189,7 @@ app.use('/api/database-discovery', databaseDiscoveryRoutes);
 app.use('/api/filesystem', filesystemRoutes);
 app.use('/api/scripts', scriptsRoutes);
 app.use('/api/config-export', configExportRoutes);
+app.use('/api/git-repos', gitReposRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
@@ -637,7 +639,8 @@ async function initializeDirectorServices(httpServer) {
             try {
                 return require('./.edition');
             } catch (e) {
-                return { edition: 'commercial', features: ['director', 'standalone', 'client'] };
+                const { getEditionInfo } = require('./utils/edition');
+                return getEditionInfo();
             }
         })();
         const identityManager = require('./services/identity-manager');

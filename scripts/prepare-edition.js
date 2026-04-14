@@ -29,7 +29,7 @@ const NODEJS_DIR = path.join(ROOT_DIR, 'nodejs');
 
 // Files that get stubbed for Community edition
 // These return 402 Payment Required until the real files are injected
-const DIRECTOR_FILES_TO_STUB = [
+const FILES_TO_STUB = [
     {
         path: 'nodejs/src/services/director-server.js',
         stub: `/**
@@ -123,6 +123,31 @@ router.all('*', (req, res) => {
 
 module.exports = router;
 `
+    },
+    {
+        path: 'nodejs/src/routes/git-repos.js',
+        stub: `/**
+ * Git Repos Routes - Community Edition Stub
+ *
+ * Returns 402 Payment Required for all Git repository API endpoints.
+ * Upgrade to Commercial edition via Infinity Tools.
+ */
+
+const express = require('express');
+const router = express.Router();
+
+router.all('*', (req, res) => {
+    res.status(402).json({
+        success: false,
+        error: 'payment_required',
+        detail: 'Git repository backup is only available in the Commercial edition.',
+        upgrade_url: 'https://www.speedbits.io',
+        feature: 'git_repos',
+    });
+});
+
+module.exports = router;
+`
     }
 ];
 
@@ -136,7 +161,7 @@ console.log('');
 
 // Step 1: Create stub files
 console.log('📝 Step 1: Creating Community edition stub files');
-for (const file of DIRECTOR_FILES_TO_STUB) {
+for (const file of FILES_TO_STUB) {
     const fullPath = path.join(ROOT_DIR, file.path);
     const dir = path.dirname(fullPath);
     
@@ -159,7 +184,7 @@ const marker = {
     upgrade_url: 'https://www.speedbits.io',
     build_type: 'single-image',
     prepared_at: new Date().toISOString(),
-    note: 'Commercial edition activated at runtime if /app/commercial/director-server.js exists'
+    note: 'Commercial edition activated at runtime if /app/commercial/ contains injected files'
 };
 
 const editionDir = path.join(NODEJS_DIR, 'src');
@@ -183,10 +208,12 @@ console.log('📋 Image Configuration:');
 console.log('   • Default mode: Community edition');
 console.log('   • Director routes: Stubbed (returns 402)');
 console.log('   • Director service: Stubbed (throws error)');
+console.log('   • Git repos routes: Stubbed (returns 402)');
+console.log('   • MSSQL & AWS IAM: Gated via feature flags in backups route');
 console.log('');
 console.log('🔓 To activate Commercial edition at runtime:');
-console.log('   1. Mount real director-server.js to /app/commercial/');
-console.log('   2. Container startup script detects and copies it');
+console.log('   1. Mount commercial files to /app/commercial/');
+console.log('   2. Container startup script detects and copies them');
 console.log('   3. EDITION env var set to "commercial"');
 console.log('');
 console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');

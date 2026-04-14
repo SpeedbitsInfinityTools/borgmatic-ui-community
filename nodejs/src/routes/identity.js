@@ -6,29 +6,7 @@ const fs = require('fs-extra');
 const path = require('path');
 const config = require('../config');
 
-/**
- * Get edition information
- */
-function getEditionInfo() {
-    try {
-        const editionPath = path.join(__dirname, '../.edition');
-        if (fs.existsSync(editionPath)) {
-            return JSON.parse(fs.readFileSync(editionPath, 'utf8'));
-        }
-    } catch (e) {
-        console.warn('Could not read edition info, assuming commercial:', e.message);
-    }
-    // Default to commercial if no edition file exists
-    return { edition: 'commercial', features: ['director', 'standalone', 'client'] };
-}
-
-/**
- * Check if a feature is available in current edition
- */
-function isFeatureAvailable(feature) {
-    const edition = getEditionInfo();
-    return edition.features.includes(feature);
-}
+const { getEditionInfo, isFeatureAvailable } = require('../utils/edition');
 
 /**
  * Migrate data from one mode directory to another
@@ -196,6 +174,7 @@ router.get('/status', authenticateToken, requireAdmin, async (req, res) => {
             data: {
                 ...status,
                 edition: editionInfo.edition,
+                features: editionInfo.features,
                 available_modes: editionInfo.features,
                 paths: {
                     config: modePaths.configDir,

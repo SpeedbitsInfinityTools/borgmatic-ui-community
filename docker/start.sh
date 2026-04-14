@@ -2,11 +2,16 @@
 # Borgmatic UI - Container Startup Script
 # 
 # This script handles runtime edition detection:
-# - If /app/commercial/director-server.js exists: Commercial edition (injected by Infinity Tools)
-# - Otherwise: Community edition (built-in stub)
+# - If /app/commercial/director-server.js exists: Commercial edition (license anchor)
+# - Otherwise: Community edition (built-in stubs)
+#
+# Commercial files:
+#   director-server.js  -> /app/src/services/  (enables Director mode)
+#   git-repos.js        -> /app/src/routes/    (enables Git repo backup)
+#   MSSQL & AWS IAM are unlocked by the .edition features array (no separate files needed)
 #
 # The single Docker image defaults to Community. Infinity Tools mounts the real
-# director-server.js file to enable Commercial/Director mode at runtime.
+# files to enable Commercial features at runtime.
 
 set -e
 
@@ -32,18 +37,25 @@ echo "   Config: $CONFIG_DIR"
 echo "   Data:   $DATA_DIR"
 echo "   Logs:   $LOGS_DIR"
 
-# Check for injected Commercial edition file
-COMMERCIAL_FILE="/app/commercial/director-server.js"
-TARGET_FILE="/app/src/services/director-server.js"
+# Check for injected Commercial edition files
+COMMERCIAL_DIRECTOR="/app/commercial/director-server.js"
+COMMERCIAL_GIT_REPOS="/app/commercial/git-repos.js"
+TARGET_DIRECTOR="/app/src/services/director-server.js"
+TARGET_GIT_REPOS="/app/src/routes/git-repos.js"
 
-if [ -f "$COMMERCIAL_FILE" ]; then
+if [ -f "$COMMERCIAL_DIRECTOR" ]; then
     echo ""
-    echo "🔓 Commercial edition file detected!"
-    echo "   Injecting: $COMMERCIAL_FILE"
-    
-    # Copy the injected file to the services directory
-    cp "$COMMERCIAL_FILE" "$TARGET_FILE"
-    
+    echo "🔓 Commercial edition files detected!"
+
+    if [ -f "$COMMERCIAL_DIRECTOR" ]; then
+        cp "$COMMERCIAL_DIRECTOR" "$TARGET_DIRECTOR"
+        echo "   Injected: director-server.js"
+    fi
+    if [ -f "$COMMERCIAL_GIT_REPOS" ]; then
+        cp "$COMMERCIAL_GIT_REPOS" "$TARGET_GIT_REPOS"
+        echo "   Injected: git-repos.js"
+    fi
+
     # Set edition environment variable
     export EDITION="commercial"
     
@@ -51,7 +63,7 @@ if [ -f "$COMMERCIAL_FILE" ]; then
     cat > /app/src/.edition << 'EOF'
 {
   "edition": "commercial",
-  "features": ["director", "standalone", "client"],
+  "features": ["director", "standalone", "client", "git_repos", "mssql", "aws_iam"],
   "requires_injection": false,
   "activated_at": "TIMESTAMP"
 }
@@ -60,15 +72,21 @@ EOF
     sed -i "s/TIMESTAMP/$(date -Iseconds)/" /app/src/.edition
     
     echo "   ✅ Commercial edition activated"
-    echo "   📋 Features: Director, Standalone, Client modes"
+    echo "   📋 Features: Director, Standalone, Client, Git Repos, MSSQL, AWS IAM"
 else
     echo ""
     echo "📦 Running as Community edition (default)"
     export EDITION="community"
     echo "   📋 Features: Standalone, Client modes"
     echo ""
-    echo "   ℹ️  To enable Director mode, deploy via Infinity Tools:"
+    echo "   ℹ️  To enable all features, deploy via Infinity Tools:"
     echo "      https://www.speedbits.io"
+    if [ -f "$COMMERCIAL_GIT_REPOS" ]; then
+        echo ""
+        echo "   ⚠️  git-repos.js was mounted, but Director anchor file is missing:"
+        echo "      /app/commercial/director-server.js"
+        echo "   Keeping Community edition to avoid partial/unsafe activation."
+    fi
 fi
 
 echo ""

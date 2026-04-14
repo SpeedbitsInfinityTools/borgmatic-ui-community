@@ -299,6 +299,7 @@ const TerminalLogViewer: React.FC<TerminalLogViewerProps> = ({
           {isLoading && (
             <Loader className="w-4 h-4 text-blue-400 animate-spin" />
           )}
+          <span className="text-xs text-gray-500 ml-2">UTC</span>
         </div>
 
         <div className="flex items-center space-x-2">
