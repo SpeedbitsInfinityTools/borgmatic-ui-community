@@ -71,14 +71,16 @@ const Settings: React.FC = () => {
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [selectedUserId, setSelectedUserId] = useState<number | null>(null);
   const [operatingMode, setOperatingMode] = useState<string | null>(null);
+  const [appEdition, setAppEdition] = useState<string>('');
 
-  // Fetch operating mode
+  // Fetch operating mode and edition
   useEffect(() => {
     const fetchMode = async () => {
       try {
         const { identityAPI } = await import('../services/api');
         const response = await identityAPI.getStatus();
         setOperatingMode(response.data.data.mode);
+        setAppEdition(response.data.data.edition || '');
       } catch (error) {
         console.error('Failed to fetch mode:', error);
       }
@@ -668,6 +670,13 @@ const Settings: React.FC = () => {
                       <Shield className="w-4 h-4 text-gray-400 mr-3" />
                       <span className="text-sm text-gray-600">Borgmatic Version:</span>
                       <span className="ml-auto text-sm font-medium">{systemForm.borgmatic_version}</span>
+                    </div>
+                    <div className="flex items-center">
+                      <Shield className="w-4 h-4 text-gray-400 mr-3" />
+                      <span className="text-sm text-gray-600">Edition:</span>
+                      <span className={`ml-auto text-sm font-medium ${appEdition === 'commercial' ? 'text-green-600' : 'text-gray-600'}`}>
+                        {appEdition === 'commercial' ? 'Commercial' : appEdition === 'community' ? 'Community' : '—'}
+                      </span>
                     </div>
                   </div>
                 </div>

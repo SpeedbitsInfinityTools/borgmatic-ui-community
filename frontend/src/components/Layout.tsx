@@ -88,6 +88,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     }
   )
   const appVersion = healthData?.data?.version || ''
+  const appEdition = statusData?.data?.data?.edition || ''
 
   // Refresh key data when user navigates to a new page
   // This ensures the user always sees fresh data immediately on navigation
@@ -392,6 +393,12 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             })}
           </nav>
           <div className="border-t border-gray-200 p-4">
+            {appVersion && (
+              <div className="mb-3 px-2 text-xs text-gray-400">
+                <span>v{appVersion}</span>
+                {appEdition && <span className="ml-1.5">· {appEdition === 'commercial' ? 'Commercial' : 'Community'}</span>}
+              </div>
+            )}
             <button
               onClick={() => setShowPasswordModal(true)}
               className="flex items-center w-full hover:bg-gray-50 p-2 rounded-md transition-colors"
@@ -506,6 +513,12 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             })}
           </nav>
           <div className="border-t border-gray-200 p-4">
+            {appVersion && (
+              <div className="mb-3 px-2 text-xs text-gray-400">
+                <span>v{appVersion}</span>
+                {appEdition && <span className="ml-1.5">· {appEdition === 'commercial' ? 'Commercial' : 'Community'}</span>}
+              </div>
+            )}
             <button
               onClick={() => setShowPasswordModal(true)}
               className="flex items-center w-full hover:bg-gray-50 p-2 rounded-md transition-colors"
