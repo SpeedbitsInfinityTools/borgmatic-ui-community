@@ -107,8 +107,10 @@ RUN apk add --no-cache \
     libxxhash \
     fuse3 \
     openssl \
-    # ICU libraries required by sqlpackage
+    # ICU + glibc compat required by sqlpackage (standalone zip is glibc-based)
     icu-libs \
+    gcompat \
+    libstdc++ \
     # Database clients for borgmatic database hooks
     mariadb-client \
     postgresql-client
