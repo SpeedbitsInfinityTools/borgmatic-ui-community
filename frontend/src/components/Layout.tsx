@@ -133,6 +133,17 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             icon: '❌',
           }
         )
+        queryClient.invalidateQueries('error-count')
+        break
+
+      case 'backup_stopped':
+        toast(
+          `Backup "${lastEvent.data.backup_name || lastEvent.data.backup_id}" was cancelled`,
+          {
+            duration: 5000,
+            icon: '🛑',
+          }
+        )
         break
 
       case 'backup_completed': {
@@ -145,6 +156,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
               icon: '⚠️',
             }
           )
+          queryClient.invalidateQueries('error-count')
         } else {
           toast.success(
             `Backup "${bName}" completed successfully`,

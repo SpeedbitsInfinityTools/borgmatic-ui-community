@@ -445,7 +445,7 @@ const WizardStepSources: React.FC<WizardStepSourcesProps> = (props) => {
                   <li><strong>GitHub (Fine-grained PAT)</strong> — Token with <strong>Contents: Read</strong> permission. True read-only access, but scoped to one <strong>resource owner</strong> (org or user). Need a separate PAT per org.</li>
                   <li><strong>GitLab</strong> — Personal Access Token with <code className="bg-purple-100 px-1 rounded">read_api</code> + <code className="bg-purple-100 px-1 rounded">read_repository</code> scopes.</li>
                   <li><strong>Azure DevOps</strong> — PAT with <strong>Code (Read)</strong> + <strong>Project (Read)</strong> permissions.</li>
-                  <li><strong>Bitbucket</strong> — App Password with <strong>Repositories: Read</strong> permission.</li>
+                  <li><strong>Bitbucket</strong> — API Token (Repository / Project / Workspace Access Token) <em>or</em> App Password (username + password) with <strong>Repositories: Read</strong> permission.</li>
                 </ul>
                 <p className="text-purple-600 mb-2"><strong>Recommendation:</strong> For backups, a <strong>Classic PAT</strong> with <code className="bg-purple-100 px-1 rounded">repo</code> scope is simplest — one token covers all your orgs and personal repos. This tool only performs read operations (clone, fetch, API listing).</p>
 
@@ -1063,34 +1063,71 @@ const GitSourceCard: React.FC<GitSourceCardProps> = ({
         </div>
 
         {/* Authentication */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-          {source.platform === 'bitbucket' ? (
-            <>
-              <div>
-                <label className="block text-xs text-gray-600 mb-0.5">Username</label>
-                <input type="text" value={source.bb_username || ''} onChange={(e) => updateSource(index, 'bb_username', e.target.value)} onBlur={() => trimSourceField(index, 'bb_username')} placeholder="Bitbucket username" className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-purple-500 focus:border-purple-500" />
-              </div>
-              <div>
-                <label className="block text-xs text-gray-600 mb-0.5">App Password</label>
+        <div className="space-y-2">
+          {source.platform === 'bitbucket' && (
+            <div className="flex gap-2">
+              <button type="button" onClick={() => {
+                const newSources = [...formData.sources];
+                newSources[index] = { ...newSources[index], bb_auth_mode: 'api_token', bb_app_password: '' };
+                setFormData({ ...formData, sources: newSources });
+              }} className={`flex-1 px-3 py-1.5 text-xs border rounded-lg ${(!source.bb_auth_mode || source.bb_auth_mode === 'api_token' || source.bb_auth_mode === 'access_token') ? 'border-purple-500 bg-purple-50 text-purple-700' : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'}`}>
+                API Token
+              </button>
+              <button type="button" onClick={() => {
+                const newSources = [...formData.sources];
+                newSources[index] = { ...newSources[index], bb_auth_mode: 'app_password', pat: '' };
+                setFormData({ ...formData, sources: newSources });
+              }} className={`flex-1 px-3 py-1.5 text-xs border rounded-lg ${source.bb_auth_mode === 'app_password' ? 'border-purple-500 bg-purple-50 text-purple-700' : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'}`}>
+                App Password
+              </button>
+            </div>
+          )}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {source.platform === 'bitbucket' && source.bb_auth_mode === 'app_password' ? (
+              <>
+                <div>
+                  <label className="block text-xs text-gray-600 mb-0.5">Username</label>
+                  <input type="text" value={source.bb_username || ''} onChange={(e) => updateSource(index, 'bb_username', e.target.value)} onBlur={() => trimSourceField(index, 'bb_username')} placeholder="Bitbucket username" className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-purple-500 focus:border-purple-500" />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-600 mb-0.5">App Password</label>
+                  <div className="relative">
+                    <input type={showGitPat[index] ? 'text' : 'password'} value={source.bb_app_password || ''} onChange={(e) => updateSource(index, 'bb_app_password', e.target.value)} placeholder="App password" className="w-full px-2 py-1.5 pr-8 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-purple-500 focus:border-purple-500" />
+                    <button type="button" onClick={() => setShowGitPat(prev => ({ ...prev, [index]: !prev[index] }))} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+                      {showGitPat[index] ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                    </button>
+                  </div>
+                </div>
+              </>
+            ) : source.platform === 'bitbucket' ? (
+              <>
+                <div>
+                  <label className="block text-xs text-gray-600 mb-0.5">Username or Email</label>
+                  <input type="text" value={source.bb_username || ''} onChange={(e) => updateSource(index, 'bb_username', e.target.value)} onBlur={() => trimSourceField(index, 'bb_username')} placeholder="Bitbucket username or Atlassian email" className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-purple-500 focus:border-purple-500" />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-600 mb-0.5">API Token</label>
+                  <div className="relative">
+                    <input type={showGitPat[index] ? 'text' : 'password'} value={source.pat || ''} onChange={(e) => updateSource(index, 'pat', e.target.value)} placeholder="ATATT3xFfGF0..." className="w-full px-2 py-1.5 pr-8 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-purple-500 focus:border-purple-500" />
+                    <button type="button" onClick={() => setShowGitPat(prev => ({ ...prev, [index]: !prev[index] }))} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+                      {showGitPat[index] ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-gray-400 mt-0.5">Create under Repository / Project / Workspace settings &rarr; Access Tokens</p>
+                </div>
+              </>
+            ) : (
+              <div className="sm:col-span-2">
+                <label className="block text-xs text-gray-600 mb-0.5">Personal Access Token (PAT)</label>
                 <div className="relative">
-                  <input type={showGitPat[index] ? 'text' : 'password'} value={source.bb_app_password || ''} onChange={(e) => updateSource(index, 'bb_app_password', e.target.value)} placeholder="App password" className="w-full px-2 py-1.5 pr-8 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-purple-500 focus:border-purple-500" />
+                  <input type={showGitPat[index] ? 'text' : 'password'} value={source.pat || ''} onChange={(e) => updateSource(index, 'pat', e.target.value)} placeholder={source.platform === 'github' ? 'ghp_...' : source.platform === 'gitlab' ? 'glpat-...' : 'PAT'} className="w-full px-2 py-1.5 pr-8 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-purple-500 focus:border-purple-500" />
                   <button type="button" onClick={() => setShowGitPat(prev => ({ ...prev, [index]: !prev[index] }))} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
                     {showGitPat[index] ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                   </button>
                 </div>
               </div>
-            </>
-          ) : (
-            <div className="sm:col-span-2">
-              <label className="block text-xs text-gray-600 mb-0.5">Personal Access Token (PAT)</label>
-              <div className="relative">
-                <input type={showGitPat[index] ? 'text' : 'password'} value={source.pat || ''} onChange={(e) => updateSource(index, 'pat', e.target.value)} placeholder={source.platform === 'github' ? 'ghp_...' : source.platform === 'gitlab' ? 'glpat-...' : 'PAT'} className="w-full px-2 py-1.5 pr-8 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-purple-500 focus:border-purple-500" />
-                <button type="button" onClick={() => setShowGitPat(prev => ({ ...prev, [index]: !prev[index] }))} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
-                  {showGitPat[index] ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                </button>
-              </div>
-            </div>
-          )}
+            )}
+          </div>
         </div>
 
         {/* Backup Type */}

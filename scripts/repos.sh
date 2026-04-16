@@ -377,9 +377,20 @@ BB_USERNAME=$(echo "$BB_USERNAME" | tr -d '\r' | xargs)
 BB_APP_PASSWORD=$(echo "$BB_APP_PASSWORD" | tr -d '\r' | xargs)
 
 # Validate credentials based on platform
+# Bitbucket supports two auth modes:
+#   1. App Password: username + appPassword
+#   2. API Token: username/email + pat (Basic auth, git uses x-bitbucket-api-token-auth)
+BB_AUTH_MODE="app_password"
 if [[ "$PLATFORM" == "bitbucket" ]]; then
-  if [[ -z "$BB_USERNAME" || -z "$BB_APP_PASSWORD" ]]; then
-    echo "ERROR: Bitbucket requires 'username' and 'appPassword' in keys file"
+  if [[ -n "$PAT" && -n "$BB_USERNAME" ]]; then
+    BB_AUTH_MODE="access_token"
+  elif [[ -n "$PAT" ]]; then
+    echo "ERROR: Bitbucket API Token mode also requires 'username' (Bitbucket username or Atlassian email)"
+    exit 1
+  elif [[ -n "$BB_USERNAME" && -n "$BB_APP_PASSWORD" ]]; then
+    BB_AUTH_MODE="app_password"
+  else
+    echo "ERROR: Bitbucket requires either 'username' + 'pat' (API token) or 'username' + 'appPassword' in keys file"
     exit 1
   fi
 else
@@ -589,8 +600,14 @@ backup_git_repo() {
     url)
       auth_url="${repo_url/https:\/\//https:\/\/$PAT@}"
       ;;
+    gitlab_url)
+      auth_url="${repo_url/https:\/\//https:\/\/oauth2:$PAT@}"
+      ;;
     basic)
       auth_url="${repo_url/https:\/\//https:\/\/$BB_USERNAME:$BB_APP_PASSWORD@}"
+      ;;
+    bitbucket_token)
+      auth_url="${repo_url/https:\/\//https:\/\/x-bitbucket-api-token-auth:$PAT@}"
       ;;
   esac
   
@@ -890,6 +907,9 @@ api_request() {
       ;;
     bitbucket)
       http_code=$(curl -sS -w "%{http_code}" -o "$API_RESPONSE_FILE" -u "$BB_USERNAME:$BB_APP_PASSWORD" "$url" 2>"$error_file") || curl_exit=$?
+      ;;
+    bitbucket_token)
+      http_code=$(curl -sS -w "%{http_code}" -o "$API_RESPONSE_FILE" -u "$BB_USERNAME:$PAT" "$url" 2>"$error_file") || curl_exit=$?
       ;;
   esac
   
@@ -1373,7 +1393,7 @@ run_gitlab() {
     [[ -z "$repo_name" || -z "$repo_url" ]] && continue
     local group="${namespace:-gitlab}"
     is_repo_selected "$repo_name" "$group/$repo_name" || continue
-    backup_git_repo "$group" "$repo_name" "$repo_url" "$default_branch" "url"
+    backup_git_repo "$group" "$repo_name" "$repo_url" "$default_branch" "gitlab_url"
   done <<< "$repos_tsv"
 }
 
@@ -1385,11 +1405,13 @@ bitbucket_get_repos_tsv() {
   local workspace="$1"
   local next_url="https://api.bitbucket.org/2.0/repositories/${workspace}?pagelen=100"
   local first_call=true
+  local api_auth="bitbucket"
+  [[ "$BB_AUTH_MODE" == "access_token" ]] && api_auth="bitbucket_token"
   
   [[ -n "$BITBUCKET_PROJECT" ]] && next_url="${next_url}&q=project.key=\"${BITBUCKET_PROJECT}\""
   
   while [[ -n "$next_url" ]]; do
-    if ! api_request "$next_url" "bitbucket"; then
+    if ! api_request "$next_url" "$api_auth"; then
       if [[ "$first_call" == "true" ]]; then
         explain_http_error "$API_HTTP_CODE" "bitbucket" >&2
         return 1
@@ -1398,7 +1420,7 @@ bitbucket_get_repos_tsv() {
     fi
     first_call=false
     
-    jq -r '.values[] | [.name, .links.clone[] | select(.name=="https") | .href, .mainbranch.name // "main", .project.key // "default"] | @tsv' "$API_RESPONSE_FILE"
+    jq -r '.values[] | [.name, (.links.clone[] | select(.name=="https") | .href), (.mainbranch.name // "main"), (.project.key // "default")] | @tsv' "$API_RESPONSE_FILE"
     
     next_url=$(jq -r '.next // empty' "$API_RESPONSE_FILE")
     rm -f "$API_RESPONSE_FILE"
@@ -1414,17 +1436,21 @@ run_bitbucket() {
   
   echo "Workspace: $BITBUCKET_WORKSPACE"
   echo "Project filter: ${BITBUCKET_PROJECT:-<all>}"
+  echo "Auth mode: $BB_AUTH_MODE"
   echo
   
   local repos_tsv
   repos_tsv=$(bitbucket_get_repos_tsv "$BITBUCKET_WORKSPACE") || exit 1
   [[ -z "$repos_tsv" ]] && { echo "ERROR: No repositories found"; exit 1; }
   
+  local git_auth="basic"
+  [[ "$BB_AUTH_MODE" == "access_token" ]] && git_auth="bitbucket_token"
+  
   while IFS=$'\t' read -r repo_name repo_url default_branch project_key; do
     [[ -z "$repo_name" || -z "$repo_url" ]] && continue
     local group="${project_key:-$BITBUCKET_WORKSPACE}"
     is_repo_selected "$repo_name" "$group/$repo_name" || continue
-    backup_git_repo "$group" "$repo_name" "$repo_url" "$default_branch" "basic"
+    backup_git_repo "$group" "$repo_name" "$repo_url" "$default_branch" "$git_auth"
   done <<< "$repos_tsv"
 }
 

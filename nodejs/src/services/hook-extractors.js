@@ -178,6 +178,7 @@ function getSourcesSummary(config) {
         selected_repos: gs.selected_repos,
         repo_name: gs.repo_name,
         bb_username: gs.bb_username,
+        bb_auth_mode: gs.bb_auth_mode,
         include_private: gs.include_private,
         include_forks: gs.include_forks,
         include_archived: gs.include_archived,

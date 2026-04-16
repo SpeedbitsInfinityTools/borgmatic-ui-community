@@ -96,6 +96,16 @@ class BackupExecutor {
                 tempFiles: [] // Track temp files for cleanup (e.g., askpass scripts)
             });
 
+            // Clear stale last_run_status so the card doesn't show old results
+            try {
+                await backupManager.updateBackupMetadata(backupId, {
+                    last_run: startTime,
+                    last_run_status: 'running'
+                });
+            } catch (metaErr) {
+                console.warn('Could not clear stale metadata:', metaErr.message);
+            }
+
             // Extract repository paths from backup config (MOVED UP - needed for notifications)
             const repositories = backup.repositories_summary || backup.config?.location?.repositories || [];
 
@@ -339,12 +349,12 @@ class BackupExecutor {
                 }
             }
 
-            // Inject DB passwords from password-manager (encrypted at rest) for configs that reference them via env vars.
-            // We scan the YAML for placeholders like ${BORGMATIC_UI_DB_PASS_*} and populate those env vars.
+            // Inject credentials from password-manager (encrypted at rest).
+            // Scan the YAML for env-var placeholders (DB passwords + Git PATs) and populate them.
             try {
                 const yamlText = await fs.readFile(configPath, 'utf8');
-                // Match both ${VAR} (legacy) and $(printenv VAR) patterns
-                const matches = Array.from(yamlText.matchAll(/(?:\$\{|printenv\s+)(BORGMATIC_UI_DB_PASS_[A-Za-z0-9_]+)/g)).map(m => m[1]);
+                // Match both ${VAR} (legacy) and $(printenv VAR) patterns for DB and Git credentials
+                const matches = Array.from(yamlText.matchAll(/(?:\$\{|printenv\s+)(BORGMATIC_UI_(?:DB_PASS|GIT_PAT)_[A-Za-z0-9_]+)/g)).map(m => m[1]);
                 const uniqueEnvVars = Array.from(new Set(matches));
                 
                 if (uniqueEnvVars.length > 0) {
@@ -361,19 +371,19 @@ class BackupExecutor {
                                     env[varName] = pw;
                                     loadedCount++;
                                 } else {
-                                    console.warn(`⚠️  DB credentials found but no password property for ${varName}. Keys: ${Object.keys(creds?.credentials || {}).join(', ')}`);
+                                    console.warn(`⚠️  Credentials found but no password property for ${varName}. Keys: ${Object.keys(creds?.credentials || {}).join(', ')}`);
                                 }
                             } else {
-                                console.warn(`⚠️  No DB credentials found in vault for ${varName}`);
+                                console.warn(`⚠️  No credentials found in vault for ${varName}`);
                             }
                         } catch (e) {
-                            console.warn(`⚠️  Could not load DB password for ${varName}:`, e.message);
+                            console.warn(`⚠️  Could not load credentials for ${varName}:`, e.message);
                         }
                     }
-                    console.log(`🔐 Loaded ${loadedCount}/${uniqueEnvVars.length} DB password entries from vault`);
+                    console.log(`🔐 Loaded ${loadedCount}/${uniqueEnvVars.length} credential entries from vault`);
                 }
             } catch (e) {
-                console.warn('⚠️  Could not scan config for DB password placeholders:', e.message);
+                console.warn('⚠️  Could not scan config for credential placeholders:', e.message);
             }
 
             // Pre-flight: verify MSSQL tools are available before starting
@@ -463,7 +473,8 @@ class BackupExecutor {
             return new Promise((resolve, reject) => {
                 const childProcess = spawn('borgmatic', args, {
                     env,
-                    stdio: ['ignore', 'pipe', 'pipe']
+                    stdio: ['ignore', 'pipe', 'pipe'],
+                    detached: true
                 });
 
                 // Store process reference
@@ -501,6 +512,13 @@ class BackupExecutor {
                 // Handle process completion
                 childProcess.on('close', async (code) => {
                     const duration = Date.now() - new Date(startTime).getTime();
+
+                    // If stopBackup() already handled this, resolve silently
+                    const currentInfo = this.runningBackups.get(backupId);
+                    if (!currentInfo || currentInfo.stopped) {
+                        resolve({ success: false, stopped: true, duration });
+                        return;
+                    }
                     
                     try {
                         // Borgmatic uses exit code 1 for both minor warnings
@@ -631,6 +649,12 @@ class BackupExecutor {
 
                 // Handle process errors
                 childProcess.on('error', async (error) => {
+                    const currentInfo = this.runningBackups.get(backupId);
+                    if (!currentInfo || currentInfo.stopped) {
+                        resolve({ success: false, stopped: true });
+                        return;
+                    }
+
                     console.error(`❌ Backup process error: ${backup.name}`, error);
 
                     await this._appendToLogFile(backup.name, error.message, stdoutData);
@@ -703,19 +727,31 @@ class BackupExecutor {
         }
 
         const info = this.runningBackups.get(backupId);
-        
+
+        // Mark as stopped so the close handler doesn't double-process
+        info.stopped = true;
+
         if (info.process) {
             console.log(`🛑 Stopping backup: ${backupId}`);
             
-            // Try graceful termination first
-            info.process.kill('SIGTERM');
+            try {
+                // Kill the entire process group (borgmatic + hook scripts + child tools)
+                // so that SIGTERM doesn't propagate back to our Node.js process
+                process.kill(-info.process.pid, 'SIGTERM');
+            } catch (killErr) {
+                // Fallback: kill just the direct child
+                try { info.process.kill('SIGTERM'); } catch (e) { /* already exited */ }
+            }
             
             // Force kill after 10 seconds if still running
+            const pid = info.process.pid;
             setTimeout(() => {
-                if (this.isBackupRunning(backupId)) {
-                    console.log(`💥 Force killing backup: ${backupId}`);
-                    info.process.kill('SIGKILL');
-                }
+                try {
+                    if (this.isBackupRunning(backupId)) {
+                        console.log(`💥 Force killing backup: ${backupId}`);
+                        process.kill(-pid, 'SIGKILL');
+                    }
+                } catch (e) { /* process already exited */ }
             }, 10000);
         }
 
@@ -729,10 +765,14 @@ class BackupExecutor {
 
         this.runningBackups.delete(backupId);
 
-        await backupManager.updateBackupMetadata(backupId, {
-            last_run: new Date().toISOString(),
-            last_run_status: 'failed'
-        });
+        try {
+            await backupManager.updateBackupMetadata(backupId, {
+                last_run: new Date().toISOString(),
+                last_run_status: 'failed'
+            });
+        } catch (metaErr) {
+            console.warn(`⚠️ Could not update metadata for stopped backup: ${metaErr.message}`);
+        }
 
         eventManager.broadcastEvent('backup_stopped', {
             backup_id: backupId,

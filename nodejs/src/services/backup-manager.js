@@ -274,7 +274,12 @@ class BackupManager {
             // Then, discover backups created outside the UI (YAML files without metadata)
             try {
                 const files = await fs.readdir(this.backupsDir);
-                const yamlFiles = files.filter(f => (f.endsWith('.yaml') || f.endsWith('.yml')) && !metadataFilenames.has(f));
+                const yamlFiles = files.filter(f =>
+                    (f.endsWith('.yaml') || f.endsWith('.yml')) &&
+                    !metadataFilenames.has(f) &&
+                    !f.startsWith('git-job-') &&
+                    !f.startsWith('git-keys-')
+                );
                 
                 for (const filename of yamlFiles) {
                     try {
@@ -1364,6 +1369,7 @@ class BackupManager {
             selected_repos: source.selected_repos || undefined,
             repo_name: source.repo_name || undefined,
             bb_username: source.bb_username || undefined,
+            bb_auth_mode: source.bb_auth_mode || undefined,
             include_private: source.include_private,
             include_forks: source.include_forks,
             include_archived: source.include_archived,
@@ -1385,24 +1391,30 @@ class BackupManager {
         const jobFilePathQ = this._shellSingleQuote(jobFilePath);
         const keysFilePathQ = this._shellSingleQuote(keysFilePath);
 
+        const isBbAccessToken = source.platform === 'bitbucket' && (source.bb_auth_mode === 'api_token' || source.bb_auth_mode === 'access_token');
+        const isBbAppPassword = source.platform === 'bitbucket' && source.bb_auth_mode === 'app_password';
+
         let hookScript = `#!/bin/sh
 set -eu
 # BORGMATIC_UI_GIT_META_B64:${metadataB64}
-GIT_PAT="$(printenv ${patEnvVar} 2>/dev/null || true)"
+CRED="$(printenv ${patEnvVar} 2>/dev/null || true)"
 BB_USER=${this._shellSingleQuote(source.bb_username || '')}
-BB_APP_PASS="$(printenv ${patEnvVar} 2>/dev/null || true)"
 KEYS_FILE=${keysFilePathQ}
 REPOS_SH=${reposShQ}
 cleanup_keys() {
   printf 'pat: ""\\nusername: ""\\nappPassword: ""\\n' > "$KEYS_FILE" 2>/dev/null || true
 }
 trap cleanup_keys EXIT INT TERM
-printf 'pat: "%s"\\nusername: "%s"\\nappPassword: "%s"\\n' "$GIT_PAT" "$BB_USER" "$BB_APP_PASS" > "$KEYS_FILE"
-"$REPOS_SH" --job=${jobFilePathQ} --backup --yes`;
+${isBbAppPassword
+  ? 'printf \'pat: ""\\nusername: "%s"\\nappPassword: "%s"\\n\' "$BB_USER" "$CRED" > "$KEYS_FILE"'
+  : isBbAccessToken
+    ? 'printf \'pat: "%s"\\nusername: "%s"\\nappPassword: ""\\n\' "$CRED" "$BB_USER" > "$KEYS_FILE"'
+    : 'printf \'pat: "%s"\\nusername: "%s"\\nappPassword: "%s"\\n\' "$CRED" "$BB_USER" "$CRED" > "$KEYS_FILE"'}
+bash "$REPOS_SH" --job=${jobFilePathQ} --backup --yes`;
 
         if (source.backup_type === 'both' && cloneJobFilePath) {
             const cloneJobPathQ = this._shellSingleQuote(cloneJobFilePath);
-            hookScript += `\n"$REPOS_SH" --job=${cloneJobPathQ} --backup --yes`;
+            hookScript += `\nbash "$REPOS_SH" --job=${cloneJobPathQ} --backup --yes`;
         }
 
         this._appendCommandHook(config, {

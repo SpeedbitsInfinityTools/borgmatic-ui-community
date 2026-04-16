@@ -96,10 +96,13 @@ const WizardStepAdvanced: React.FC<WizardStepAdvancedProps> = ({
                 setFormData({ ...formData, archive_name_format: e.target.value })
               }
               className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-              placeholder="{hostname}-{now}"
+              placeholder={formData.name
+                ? `{hostname}-${formData.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}-{now}`
+                : '{hostname}-{now}'}
             />
             <p className="mt-1 text-xs text-gray-500">
-              Variables: <code className="text-xs bg-gray-100 px-1 py-0.5 rounded">{'{hostname}'}</code>,{' '}
+              Leave empty to auto-generate from backup name. Variables:{' '}
+              <code className="text-xs bg-gray-100 px-1 py-0.5 rounded">{'{hostname}'}</code>,{' '}
               <code className="text-xs bg-gray-100 px-1 py-0.5 rounded">{'{now}'}</code>,{' '}
               <code className="text-xs bg-gray-100 px-1 py-0.5 rounded">{'{user}'}</code>
             </p>

@@ -83,7 +83,7 @@ export function useBackupWizard({ onClose, onSuccess, editBackup, mode = 'produc
     exclude_patterns: dataSource?.exclude_patterns || [],
     exclude_caches: dataSource?.exclude_caches !== false,
     upload_rate_limit: dataSource?.upload_rate_limit || 0,
-    archive_name_format: dataSource?.archive_name_format || '{hostname}-{now}',
+    archive_name_format: dataSource?.archive_name_format || '',
     check_frequency: dataSource?.check_frequency || '2 weeks',
     log_file: dataSource?.log_file || '',
     log_level: dataSource?.log_level || 'info',
@@ -522,7 +522,8 @@ export function useBackupWizard({ onClose, onSuccess, editBackup, mode = 'produc
         exclude_patterns: formData.exclude_patterns.filter((p: string) => p.trim()),
         exclude_caches: formData.exclude_caches,
         upload_rate_limit: formData.upload_rate_limit,
-        archive_name_format: formData.archive_name_format,
+        archive_name_format: formData.archive_name_format ||
+          `{hostname}-${formData.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}-{now}`,
         check_frequency: formData.check_frequency,
         log_file: formData.log_file,
         log_level: formData.log_level,

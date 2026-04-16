@@ -16,9 +16,21 @@ import {
   Loader2,
   Lock,
   Unlock,
+  HardDrive,
+  Globe,
+  Cloud,
+  Server,
 } from 'lucide-react';
 import { Repository } from '../../types/repositories';
 import { getDisplayPath, getEncryptionIcon, getCompressionLabel } from '../../utils/repositoryUtils';
+
+const STORAGE_TYPE_CONFIG: Record<string, { label: string; icon: React.ReactNode; className: string }> = {
+  local:  { label: 'Local',  icon: <HardDrive className="w-3 h-3" />, className: 'bg-blue-100 text-blue-700' },
+  ssh:    { label: 'SSH',    icon: <Server className="w-3 h-3" />,    className: 'bg-emerald-100 text-emerald-700' },
+  sftp:   { label: 'SFTP',   icon: <Server className="w-3 h-3" />,    className: 'bg-emerald-100 text-emerald-700' },
+  s3:     { label: 'S3',     icon: <Cloud className="w-3 h-3" />,     className: 'bg-orange-100 text-orange-700' },
+  rclone: { label: 'Rclone', icon: <Globe className="w-3 h-3" />,     className: 'bg-indigo-100 text-indigo-700' },
+};
 import { formatDate } from '../../utils/dateFormat';
 import ActionButton from './ActionButton';
 
@@ -125,12 +137,20 @@ const RepositoryCard: React.FC<RepositoryCardProps> = ({
                 </div>
               )}
             </div>
-            <div className="flex items-center space-x-2 flex-shrink-0">
+            <div className="flex items-center space-x-2 flex-shrink-0 flex-wrap gap-y-1">
+              {/* Storage Type Badge */}
+              {(() => {
+                const storageType = repository.repository_type || 'local';
+                const config = STORAGE_TYPE_CONFIG[storageType] || STORAGE_TYPE_CONFIG.local;
+                return (
+                  <span className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full ${config.className}`}>
+                    {config.icon}
+                    {config.label}
+                  </span>
+                );
+              })()}
               {/* Borg Version Badge */}
-              <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${repository.borg_version === '1.x'
-                ? 'bg-blue-100 text-blue-800'
-                : 'bg-purple-100 text-purple-800'
-                }`}>
+              <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-gray-100 text-gray-600">
                 Borg {repository.borg_version || '2.x'}
               </span>
               {/* Encryption Badge */}
