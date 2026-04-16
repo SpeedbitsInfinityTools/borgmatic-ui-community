@@ -482,9 +482,9 @@ const TerminalLogViewer: React.FC<TerminalLogViewerProps> = ({
                   </td>
 
                   {/* Timestamp */}
-                  {showTimestamps && log.timestamp && (
+                  {showTimestamps && (
                     <td className="w-28 text-gray-500 text-xs align-top py-0.5 whitespace-nowrap pr-2">
-                      {log.timestamp}
+                      {log.timestamp || ''}
                     </td>
                   )}
 

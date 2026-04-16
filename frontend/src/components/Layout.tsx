@@ -135,15 +135,27 @@ export default function Layout({ children }: { children: React.ReactNode }) {
         )
         break
 
-      case 'backup_completed':
-        toast.success(
-          `Backup "${lastEvent.data.backup_name || lastEvent.data.backup_id}" completed successfully`,
-          {
-            duration: 5000,
-            icon: '✅',
-          }
-        )
+      case 'backup_completed': {
+        const bName = lastEvent.data.backup_name || lastEvent.data.backup_id
+        if (lastEvent.data.status === 'warning') {
+          toast(
+            `Backup "${bName}" completed with warnings`,
+            {
+              duration: 8000,
+              icon: '⚠️',
+            }
+          )
+        } else {
+          toast.success(
+            `Backup "${bName}" completed successfully`,
+            {
+              duration: 5000,
+              icon: '✅',
+            }
+          )
+        }
         break
+      }
 
       case 'error':
         toast.error(

@@ -113,7 +113,11 @@ RUN apk add --no-cache \
     libstdc++ \
     # Database clients for borgmatic database hooks
     mariadb-client \
-    postgresql-client
+    postgresql-client \
+    # Git tools for repository backup feature
+    git \
+    jq \
+    py3-yaml
 
 # Copy the pre-compiled Borg packages from builder
 # Copy both Borg 1.x and Borg 2.x virtual environments

@@ -49,6 +49,9 @@ RUN apk add --no-cache \
     postgresql16-client \
     mongodb-tools \
     sqlite \
+    # Git backup dependencies (repos.sh needs jq + PyYAML)
+    jq \
+    py3-yaml \
     # Cron for scheduled backups
     dcron \
     && echo "node ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/node

@@ -19,6 +19,29 @@ class BackupExecutor {
     }
 
     /**
+     * Append captured stderr/stdout to borgmatic.log as a safety net.
+     * Borgmatic writes to --log-file itself, but if the process is killed
+     * or crashes before flushing, the captured pipe data is all we have.
+     */
+    async _appendToLogFile(backupName, stderrData, stdoutData) {
+        try {
+            const logSettings = await logManager.getSettings();
+            if (!logSettings.enabled || !logSettings.log_to_file) return;
+
+            const combined = (stderrData || '').trim();
+            if (!combined) return;
+
+            const logPath = logManager.getBorgmaticLogPath();
+            const timestamp = new Date().toISOString().replace('T', ' ').replace(/\.\d+Z$/, '');
+            const header = `[${timestamp}] borgmatic-ui: Captured output for "${backupName}"`;
+            const entry = `\n${header}\n${combined}\n`;
+            await fs.appendFile(logPath, entry);
+        } catch (err) {
+            console.error('Failed to append captured output to log file:', err.message);
+        }
+    }
+
+    /**
      * Check if a backup is currently running
      */
     isBackupRunning(backupId) {
@@ -480,9 +503,20 @@ class BackupExecutor {
                     const duration = Date.now() - new Date(startTime).getTime();
                     
                     try {
-                        if (code === 0 || code === 1) {
-                            // code 0 = success, code 1 = completed with warnings
-                            // (e.g. some files were unreadable — borg skipped them)
+                        // Borgmatic uses exit code 1 for both minor warnings
+                        // (e.g. deprecated config keys) AND critical failures
+                        // (missing source dirs, hook crashes, config errors).
+                        // Detect critical failures so we report "failed" not "warning".
+                        const isCriticalFailure = code === 1 && (
+                            /CRITICAL[:]/m.test(stderrData) ||
+                            /Error running (?:before|after) (?:action|backup) (?:hook|command)/i.test(stderrData) ||
+                            /returned non-zero exit status/i.test(stderrData) ||
+                            /Error running configuration/i.test(stderrData) ||
+                            /Source directories.*do not exist/i.test(stderrData) ||
+                            /Error running actions for repository/i.test(stderrData)
+                        );
+
+                        if ((code === 0 || code === 1) && !isCriticalFailure) {
                             const hasWarnings = code === 1;
                             const status = hasWarnings ? 'warning' : 'success';
 
@@ -547,8 +581,15 @@ class BackupExecutor {
                                 warnings: hasWarnings ? stderrData : null
                             });
                         } else {
-                            // Failure
-                            console.error(`❌ Backup failed: ${backup.name} (exit code: ${code})`);
+                            // Failure — exit code >= 2, or code 1 with critical errors
+                            if (isCriticalFailure) {
+                                console.error(`❌ Backup failed: ${backup.name} — borgmatic reported critical error (exit code ${code})`);
+                            } else {
+                                console.error(`❌ Backup failed: ${backup.name} (exit code: ${code})`);
+                            }
+
+                            // Write captured output to log file as safety net
+                            await this._appendToLogFile(backup.name, stderrData, stdoutData);
 
                             // Update metadata with error
                             await backupManager.updateBackupMetadata(backupId, {
@@ -591,6 +632,8 @@ class BackupExecutor {
                 // Handle process errors
                 childProcess.on('error', async (error) => {
                     console.error(`❌ Backup process error: ${backup.name}`, error);
+
+                    await this._appendToLogFile(backup.name, error.message, stdoutData);
 
                     await backupManager.updateBackupMetadata(backupId, {
                         last_run: new Date().toISOString(),
@@ -676,7 +719,20 @@ class BackupExecutor {
             }, 10000);
         }
 
+        // Persist any captured output before discarding the run info
+        const capturedOutput = info.output ? info.output.join('\n') : '';
+        this._appendToLogFile(
+            info.backup.name,
+            `Backup manually stopped by user.\n${capturedOutput}`,
+            ''
+        ).catch(() => {});
+
         this.runningBackups.delete(backupId);
+
+        await backupManager.updateBackupMetadata(backupId, {
+            last_run: new Date().toISOString(),
+            last_run_status: 'failed'
+        });
 
         eventManager.broadcastEvent('backup_stopped', {
             backup_id: backupId,
