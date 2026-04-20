@@ -514,6 +514,57 @@ router.post('/:id/duplicate', authenticateToken, requireAdmin, async (req, res) 
 });
 
 /**
+ * Get decrypted credentials for a backup (for edit wizard)
+ * GET /api/backups/:id/credentials
+ */
+router.get('/:id/credentials', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        const backup = await backupManager.getBackup(req.params.id);
+        const passwordManager = require('../services/password-manager');
+        const sources = backup.sources_summary || [];
+        const result = [];
+
+        for (let i = 0; i < sources.length; i++) {
+            const s = sources[i];
+            const entry = { index: i };
+
+            if (s.type === 'git_repos' && s.pat_env_var) {
+                try {
+                    const creds = await passwordManager.getDatabaseCredentials(s.pat_env_var);
+                    if (creds?.credentials?.password) {
+                        if (s.platform === 'bitbucket' && s.bb_auth_mode === 'app_password') {
+                            entry.bb_app_password = creds.credentials.password;
+                        } else {
+                            entry.pat = creds.credentials.password;
+                        }
+                    }
+                } catch (e) { /* vault entry missing */ }
+            }
+
+            if (s.password && /^\$\{BORGMATIC_UI_DB_PASS_/.test(s.password)) {
+                const envVar = s.password.replace(/^\$\{/, '').replace(/\}$/, '');
+                try {
+                    const creds = await passwordManager.getDatabaseCredentials(envVar);
+                    if (creds?.credentials?.password) {
+                        entry.password = creds.credentials.password;
+                    }
+                } catch (e) { /* vault entry missing */ }
+            }
+
+            if (entry.pat || entry.bb_app_password || entry.password) {
+                result.push(entry);
+            }
+        }
+
+        res.json({ success: true, data: { credentials: result } });
+    } catch (error) {
+        console.error('Failed to get backup credentials:', error);
+        const status = error.message.includes('not found') ? 404 : 500;
+        res.status(status).json({ success: false, error: error.message });
+    }
+});
+
+/**
  * Get YAML content for a backup
  * GET /api/backups/:id/yaml
  */

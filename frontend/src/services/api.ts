@@ -658,6 +658,7 @@ export const backupsAPI = {
   updateBackup: (id: string, data: any) => api.put(`/backups/${id}`, data),
   deleteBackup: (id: string, filename?: string) => api.delete(`/backups/${id}${filename ? `?filename=${encodeURIComponent(filename)}` : ''}`),
   toggleBackup: (id: string, is_active: boolean) => api.patch(`/backups/${id}/toggle`, { is_active }),
+  getCredentials: (id: string) => api.get(`/backups/${id}/credentials`),
 
   // Backup execution
   runBackup: (id: string) => api.post(`/backups/${id}/run`),
@@ -786,6 +787,18 @@ export const gitReposAPI = {
     include_subgroups?: boolean;
     repo_type?: string;
   }) => api.post('/git-repos/test-connection', params),
+}
+
+// Git Restore API
+export const gitRestoreAPI = {
+  scan: (params: { repository: string; archive: string; basePath?: string }) =>
+    api.get('/restore/git/scan', { params }),
+  testConnection: (params: any) =>
+    api.post('/restore/git/test', params),
+  execute: (params: any) =>
+    api.post('/restore/git/execute', params),
+  getStatus: (jobId: string) =>
+    api.get(`/restore/git/status/${jobId}`),
 }
 
 // Filesystem API

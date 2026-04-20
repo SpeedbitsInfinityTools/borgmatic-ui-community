@@ -222,6 +222,25 @@ export function useBackupWizard({ onClose, onSuccess, editBackup, mode = 'produc
     if (sources.some((s: any) => s.auth_method === 'aws_iam')) {
       checkAwsTools();
     }
+
+    if (editBackup?.id) {
+      backupsAPI.getCredentials(editBackup.id).then((res: any) => {
+        const creds = res.data?.data?.credentials;
+        if (Array.isArray(creds) && creds.length > 0) {
+          setFormData((prev: any) => {
+            const newSources = [...prev.sources];
+            for (const c of creds) {
+              if (newSources[c.index]) {
+                if (c.pat) newSources[c.index] = { ...newSources[c.index], pat: c.pat };
+                if (c.bb_app_password) newSources[c.index] = { ...newSources[c.index], bb_app_password: c.bb_app_password };
+                if (c.password) newSources[c.index] = { ...newSources[c.index], password: c.password };
+              }
+            }
+            return { ...prev, sources: newSources };
+          });
+        }
+      }).catch(() => { /* vault unavailable */ });
+    }
   }, []);
 
   useEffect(() => {
@@ -572,7 +591,7 @@ export function useBackupWizard({ onClose, onSuccess, editBackup, mode = 'produc
         include_private: true, include_forks: false, group_by_project: true, prune: true,
       };
     } else {
-      newSource = { type: 'postgresql', database_name: '', hostname: 'localhost', port: 5432, username: '', password: '' };
+      newSource = { type: 'postgresql', database_name: '', hostname: 'localhost', port: 5432, username: '', password: '', dump_method: 'native' };
     }
     setFormData({ ...formData, sources: [...formData.sources, newSource] });
   };

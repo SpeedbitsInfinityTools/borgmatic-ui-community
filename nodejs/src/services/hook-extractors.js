@@ -161,32 +161,40 @@ function getSourcesSummary(config) {
         if (gs.target_dir) gitRepoPaths.add(gs.target_dir);
         if (gs.target_dir_clone) gitRepoPaths.add(gs.target_dir_clone);
     }
-    sources.push(...gitRepoSources.map(gs => ({
-        type: 'git_repos',
-        platform: gs.platform,
-        scope: gs.scope || 'organization',
-        backup_type: gs.backup_type || 'mirror',
-        target_dir: gs.target_dir,
-        target_dir_clone: gs.target_dir_clone,
-        organization: gs.organization,
-        user: gs.user,
-        group: gs.group,
-        workspace: gs.workspace,
-        project: gs.project,
-        host: gs.host,
-        repo_selection: gs.repo_selection || 'all',
-        selected_repos: gs.selected_repos,
-        repo_name: gs.repo_name,
-        bb_username: gs.bb_username,
-        bb_auth_mode: gs.bb_auth_mode,
-        include_private: gs.include_private,
-        include_forks: gs.include_forks,
-        include_archived: gs.include_archived,
-        include_subgroups: gs.include_subgroups,
-        group_by_project: gs.group_by_project,
-        prune: gs.prune,
-        repo_type: gs.repo_type,
-    })));
+    sources.push(...gitRepoSources.map(gs => {
+        const envVar = gs.pat_env_var;
+        const patPlaceholder = typeof envVar === 'string' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(envVar)
+            ? '${' + envVar + '}'
+            : undefined;
+        return {
+            type: 'git_repos',
+            platform: gs.platform,
+            scope: gs.scope || 'organization',
+            backup_type: gs.backup_type || 'mirror',
+            target_dir: gs.target_dir,
+            target_dir_clone: gs.target_dir_clone,
+            organization: gs.organization,
+            user: gs.user,
+            group: gs.group,
+            workspace: gs.workspace,
+            project: gs.project,
+            host: gs.host,
+            repo_selection: gs.repo_selection || 'all',
+            selected_repos: gs.selected_repos,
+            repo_name: gs.repo_name,
+            bb_username: gs.bb_username,
+            bb_auth_mode: gs.bb_auth_mode,
+            include_private: gs.include_private,
+            include_forks: gs.include_forks,
+            include_archived: gs.include_archived,
+            include_subgroups: gs.include_subgroups,
+            group_by_project: gs.group_by_project,
+            prune: gs.prune,
+            repo_type: gs.repo_type,
+            pat: patPlaceholder,
+            pat_env_var: gs.pat_env_var,
+        };
+    }));
 
     const sourceDirs = config.source_directories || config.location?.source_directories || [];
     sources.push(...sourceDirs.map(dir => ({

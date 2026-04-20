@@ -121,6 +121,7 @@ const filesystemRoutes = require('./routes/filesystem');
 const scriptsRoutes = require('./routes/scripts');
 const configExportRoutes = require('./routes/config-export');
 const gitReposRoutes = require('./routes/git-repos');
+const gitRestoreRoutes = require('./routes/git-restore');
 const { eventManager } = require('./routes/events');
 const monitoringIntegration = require('./services/monitoring-integration');
 
@@ -190,6 +191,7 @@ app.use('/api/filesystem', filesystemRoutes);
 app.use('/api/scripts', scriptsRoutes);
 app.use('/api/config-export', configExportRoutes);
 app.use('/api/git-repos', gitReposRoutes);
+app.use('/api/restore/git', gitRestoreRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {

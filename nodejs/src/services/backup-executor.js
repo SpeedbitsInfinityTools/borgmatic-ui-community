@@ -433,29 +433,12 @@ class BackupExecutor {
             // Get log settings
             const logSettings = await logManager.getSettings();
             
-            // Check if borgmatic's native database hooks (FIFO/streaming) are active.
-            // Native hooks use mariadb_databases/mysql_databases/etc. in the YAML,
-            // which triggers borgmatic's internal JSON parsing that is incompatible
-            // with SSH warnings, causing "Expecting value" crashes during prune/compact.
-            // Backups using dump_method:'local' (command hooks) are safe since they
-            // produce regular files, not FIFOs.
-            const hasNativeDatabaseHooks = (backup.sources_summary || []).some(
-                s => s.type && s.type !== 'local' && s.type !== 'sqlite' && s.type !== 'mssql'
-                    && s.dump_method === 'native'
-            );
-
             const args = [
                 '--config', configPath,
             ];
-
-            if (hasNativeDatabaseHooks) {
-                // Native borgmatic database hooks active: text output only.
-                // --json and --stats trigger internal JSON parsing that can crash.
-                args.push('--verbosity', '1');
-            } else {
-                // File-only or dump-to-file database backups: safe to use --stats and --json.
-                args.push('--verbosity', '1', '--stats', '--json');
-            }
+            // Borgmatic baseline is now >= 2.1.5, where native DB streaming no longer
+            // breaks JSON/stats output for SSH repository warnings.
+            args.push('--verbosity', '1', '--stats', '--json');
             
             // Add logging options if enabled
             if (logSettings.enabled && logSettings.log_to_file) {

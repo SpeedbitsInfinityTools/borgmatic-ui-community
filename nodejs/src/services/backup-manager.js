@@ -1114,12 +1114,12 @@ class BackupManager {
         if (dbSource.format) dbConfig.format = dbSource.format;
         if (dbSource.compression) dbConfig.compression = dbSource.compression;
 
-        const dumpMethod = dbSource.dump_method || 'local';
+        const dumpMethod = dbSource.dump_method || 'native';
         const useNativeHook = dumpMethod === 'native';
         const hookEligible = ['mariadb', 'mysql', 'postgresql', 'mongodb'].includes(dbSource.type);
 
         if (hookEligible && useNativeHook) {
-            // Experimental: use borgmatic's native FIFO/streaming mechanism
+            // Use borgmatic's native FIFO/streaming mechanism (default for supported DBs).
             switch (dbSource.type) {
                 case 'postgresql':
                     config.postgresql_databases = config.postgresql_databases || [];

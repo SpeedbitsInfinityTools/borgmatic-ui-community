@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
-import { repositoriesAPI, archivesAPI, restoreAPI, dashboardAPI } from '../services/api';
+import { repositoriesAPI, archivesAPI, restoreAPI, dashboardAPI, backupsAPI } from '../services/api';
 import type { AxiosResponse } from 'axios';
 import {
   ChevronDown,
@@ -27,12 +27,14 @@ import {
   AlertTriangle,
   Calendar,
   ArrowUpDown,
+  GitBranch,
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { formatDateTime } from '../utils/dateFormat';
 import { getSafeDisplayPath } from '../utils/repositoryUtils';
 import { ArchiveBrowserModal } from '../components/archives';
 import RestoreOptionsModal from '../components/archives/RestoreOptionsModal';
+import RestoreGitWizard from '../components/archives/RestoreGitWizard';
 
 interface Repository {
   id: string;
@@ -105,6 +107,9 @@ const Archives = () => {
   const [timeFilter, setTimeFilter] = useState<TimeFilter>('7d');
   const [archiveSortOrder, setArchiveSortOrder] = useState<'desc' | 'asc'>('desc');
   
+  // Git restore wizard
+  const [gitRestoreTarget, setGitRestoreTarget] = useState<{ repoPath: string; archiveName: string } | null>(null);
+
   // Track active restore operation
   const [activeRestore, setActiveRestore] = useState<RestoreInfo | null>(null);
   // Track last completed restore per archive (keyed by archiveName)
@@ -252,6 +257,23 @@ const Archives = () => {
     staleTime: 300000, // 5 minutes
   });
 
+  const { data: backupsData } = useQuery({
+    queryKey: ['backups'],
+    queryFn: () => backupsAPI.getBackups().then(res => res.data),
+    staleTime: 60000,
+  });
+
+  const gitBackupJobNames = useMemo(() => {
+    const raw = backupsData?.data?.backups ?? backupsData?.data ?? [];
+    const backups = Array.isArray(raw) ? raw : [];
+    const set = new Set<string>();
+    for (const b of backups) {
+      const hasGit = (b.sources_summary || []).some((s: any) => s.type === 'git_repos');
+      if (hasGit && b.name) set.add(String(b.name).toLowerCase());
+    }
+    return set;
+  }, [backupsData]);
+
   const borgVersion = toolsHealth?.tools?.borg?.version || '';
   const isBorg2 = borgVersion.startsWith('2.');
 
@@ -393,6 +415,8 @@ const Archives = () => {
               onLoadDetails={loadBackupJobDetails}
               onViewArchive={(archiveName) => setViewingArchive({ repoId: repo.path, archiveName })}
               onRestoreArchive={(archiveName) => setRestoringArchive({ repoPath: repo.path, archiveName })}
+              onGitRestore={(archiveName) => setGitRestoreTarget({ repoPath: repo.path, archiveName })}
+              isGitBackupJob={(backupJobName) => gitBackupJobNames.has(String(backupJobName).toLowerCase())}
               onEnterPassphrase={() => setPassphraseModal({ repoId: repo.id, repoPath: repo.path })}
               isBorg2={isBorg2}
               timeFilter={timeFilter}
@@ -469,6 +493,14 @@ const Archives = () => {
           }}
         />
       )}
+
+      {/* Git Restore Wizard */}
+      <RestoreGitWizard
+        isOpen={!!gitRestoreTarget}
+        onClose={() => setGitRestoreTarget(null)}
+        repositoryPath={gitRestoreTarget?.repoPath || ''}
+        archiveName={gitRestoreTarget?.archiveName || ''}
+      />
 
       {/* Passphrase Input Modal */}
       {passphraseModal && (
@@ -577,6 +609,8 @@ const RepositoryCard = ({
   onLoadDetails,
   onViewArchive,
   onRestoreArchive,
+  onGitRestore,
+  isGitBackupJob,
   onEnterPassphrase,
   isBorg2 = false,
   timeFilter = '7d',
@@ -595,6 +629,8 @@ const RepositoryCard = ({
   onLoadDetails: (repoPath: string, archives: Archive[]) => Promise<void>;
   onViewArchive: (archiveName: string) => void;
   onRestoreArchive: (archiveName: string) => void;
+  onGitRestore: (archiveName: string) => void;
+  isGitBackupJob: (backupJobName: string) => boolean;
   onEnterPassphrase: () => void;
   isBorg2?: boolean;
   timeFilter?: TimeFilter;
@@ -839,6 +875,7 @@ const RepositoryCard = ({
                                 details={archiveDetails[archive.name]}
                                 onView={() => onViewArchive(archive.name)}
                                 onRestore={() => onRestoreArchive(archive.name)}
+                                onGitRestore={isGitBackupJob(backupJobName) ? () => onGitRestore(archive.name) : undefined}
                                 compact={true}
                                 isBorg2={isBorg2}
                                 isRestoring={activeRestore?.archiveName === archive.name}
@@ -897,6 +934,7 @@ const ArchiveRow = ({
   details,
   onView,
   onRestore,
+  onGitRestore,
   compact = false,
   isBorg2 = false,
   isRestoring = false,
@@ -907,6 +945,7 @@ const ArchiveRow = ({
   details?: any;
   onView: () => void;
   onRestore: () => void;
+  onGitRestore?: () => void;
   compact?: boolean;
   isBorg2?: boolean;
   isRestoring?: boolean;
@@ -1025,6 +1064,17 @@ const ArchiveRow = ({
             <Download className="w-3.5 h-3.5" />
             <span>Restore</span>
           </button>
+          {onGitRestore && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onGitRestore(); }}
+              disabled={isRestoring}
+              className="px-3 py-1.5 text-xs font-medium text-purple-700 bg-purple-50 hover:bg-purple-100 rounded transition-colors flex items-center space-x-1 disabled:opacity-50"
+              title="Restore git repos to a platform (GitHub, GitLab, etc.)"
+            >
+              <GitBranch className="w-3.5 h-3.5" />
+              <span>Git Restore</span>
+            </button>
+          )}
           <button
             onClick={handleDelete}
             disabled={deleteArchiveMutation.isLoading || isRestoring}

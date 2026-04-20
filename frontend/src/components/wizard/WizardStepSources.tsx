@@ -322,8 +322,8 @@ const WizardStepSources: React.FC<WizardStepSourcesProps> = (props) => {
                   <>
                     <p className="font-semibold text-blue-800 mb-1">Dump Method</p>
                     <ul className="space-y-0.5 mb-2">
-                      <li><strong>Dump locally</strong> (default) — Runs the DB client tool to create a dump file, then backs it up. Reliable with all repository types.</li>
-                      <li><strong>Borgmatic streaming</strong> (experimental) — Pipes the dump directly into the archive. Saves disk space but may fail with remote SSH repos.</li>
+                      <li><strong>Borgmatic streaming</strong> (default) — Pipes the dump directly into the archive, no temp file on disk. Recommended on borgmatic ≥ 2.1.5, which fixed the earlier SSH-warning regression that broke this path for remote repos.</li>
+                      <li><strong>Dump locally</strong> — Runs the DB client tool to create a dump file first, then backs it up. Uses transient disk space; pick this only if you are on an older borgmatic.</li>
                     </ul>
                   </>
                 )}
@@ -435,9 +435,10 @@ const WizardStepSources: React.FC<WizardStepSourcesProps> = (props) => {
 
                 <p className="font-semibold text-purple-800 mb-1">Mirror vs. Clone</p>
                 <ul className="space-y-0.5 mb-2">
-                  <li><strong>Mirror</strong> — Bare git repos (<code className="bg-purple-100 px-1 rounded">git clone --mirror</code>). Smallest size, preserves all refs. Best for disaster recovery.</li>
-                  <li><strong>Clone</strong> — Working copies with checked-out files. Useful if you need to browse/search the code directly.</li>
+                  <li><strong>Mirror (recommended)</strong> — Bare git repos (<code className="bg-purple-100 px-1 rounded">git clone --mirror</code>). Smallest size, fastest, preserves all branches, tags, and refs. Trivially restorable to any git platform with <code className="bg-purple-100 px-1 rounded">git push --mirror</code>. Best for disaster recovery.</li>
+                  <li><strong>Clone</strong> — Working copies with checked-out files. Larger on disk (files stored twice: working tree + git objects). Useful if you need to browse/search the code directly on the filesystem without git commands.</li>
                 </ul>
+                <p className="text-purple-600 mb-2"><strong>Recommendation:</strong> Use <strong>Mirror</strong> for backups. It captures everything, uses less disk space, and is the standard approach for git disaster recovery. You can restore a mirror to GitHub, GitLab, Bitbucket, or Azure DevOps with a single push command.</p>
 
                 <p className="font-semibold text-purple-800 mb-1">Authentication</p>
                 <ul className="space-y-0.5 mb-2">
@@ -795,22 +796,19 @@ const DatabaseSourceCard: React.FC<DatabaseSourceCardProps> = ({
         {['mariadb', 'mysql', 'postgresql', 'mongodb'].includes(source.type) && (
           <div className="flex items-center gap-2 pl-7 mt-2">
             <span className="text-xs text-gray-500">Dump method:</span>
-            <select value={source.dump_method || 'local'} onChange={(e) => updateSource(index, 'dump_method', e.target.value)} className="px-2 py-0.5 text-xs border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white">
+            <select value={source.dump_method || 'native'} onChange={(e) => updateSource(index, 'dump_method', e.target.value)} className="px-2 py-0.5 text-xs border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white">
+              <option value="native">Borgmatic streaming (default)</option>
               <option value="local">Dump locally, then backup</option>
-              <option value="native">Borgmatic streaming (experimental)</option>
             </select>
             <div className="relative group">
               <AlertCircle className="w-3.5 h-3.5 text-gray-400 cursor-help" />
               <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-72 p-2 bg-gray-900 text-white text-xs rounded-lg shadow-lg opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50">
-                <p className="font-semibold mb-1">Dump locally (recommended):</p>
-                <p className="mb-1.5">Runs the database client (e.g. mariadb-dump) to create a dump file first, then backs up that file. Works reliably with all repository types including remote SSH repos.</p>
-                <p className="font-semibold mb-1">Borgmatic streaming (experimental):</p>
-                <p>Uses borgmatic's native FIFO/pipe mechanism to stream the dump directly into the archive without touching disk. Saves disk space for very large databases, but may fail with remote SSH repositories due to a known borgmatic bug with JSON parsing.</p>
+                <p className="font-semibold mb-1">Borgmatic streaming (default):</p>
+                <p className="mb-1.5">Uses borgmatic's native FIFO/pipe mechanism to stream the dump directly into the archive without touching disk. Saves disk space for large databases and is the recommended method as of borgmatic 2.1.5, which fixed the earlier SSH-warning regression that broke this path for remote repositories.</p>
+                <p className="font-semibold mb-1">Dump locally, then backup:</p>
+                <p>Runs the database client (e.g. mariadb-dump) to create a dump file first, then backs up that file. Uses transient disk space equal to the dump size. Pick this if you are still on an older borgmatic or want the output to appear as a regular file inside the archive.</p>
               </div>
             </div>
-            {source.dump_method === 'native' && (
-              <span className="text-xs text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">experimental</span>
-            )}
           </div>
         )}
         <div className="flex items-center gap-2 pl-7 mt-2">
@@ -980,11 +978,10 @@ const GitSourceCard: React.FC<GitSourceCardProps> = ({
               key={p}
               type="button"
               onClick={() => updateSource(index, 'platform', p)}
-              className={`px-3 py-1.5 text-xs border rounded-lg transition-colors ${
-                source.platform === p
+              className={`px-3 py-1.5 text-xs border rounded-lg transition-colors ${source.platform === p
                   ? 'border-purple-500 bg-purple-50 text-purple-700 font-medium'
                   : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'
-              }`}
+                }`}
             >
               {p === 'github' ? 'GitHub' : p === 'gitlab' ? 'GitLab' : p === 'bitbucket' ? 'Bitbucket' : 'Azure DevOps'}
             </button>
@@ -1141,7 +1138,7 @@ const GitSourceCard: React.FC<GitSourceCardProps> = ({
             ))}
           </div>
           <p className="mt-1 text-xs text-gray-500">
-            {source.backup_type === 'both' ? 'Runs both modes: one mirror directory plus one clone directory.' : source.backup_type === 'clone' ? 'Working copies with checked-out files. Best for browsing and searching code.' : 'Bare git mirrors. Smallest size, best for disaster recovery.'}
+            {source.backup_type === 'both' ? 'Runs both modes: one mirror directory plus one clone directory.' : source.backup_type === 'clone' ? 'Working copies with checked-out files. Larger on disk. Best for browsing and searching code.' : 'Recommended. Bare git mirrors — smallest size, fastest, all refs preserved. Easily restorable with git push --mirror.'}
           </p>
         </div>
 
