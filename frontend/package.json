@@ -1,6 +1,6 @@
 {
   "name": "speedbits-borgmatic-ui-frontend",
-  "version": "1.0.33",
+  "version": "1.0.34",
   "description": "React frontend for SpeedBits Borgmatic UI",
   "private": true,
   "dependencies": {

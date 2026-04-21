@@ -14,15 +14,20 @@ nodejs/src/services/director-server.js
 nodejs/src/routes/director.js
 
 # Development data (has permission issues, not needed for build anyway)
-dev-data/
+/dev-data/
 
 # Runtime data and configuration (not needed for build)
-config/
-data/
-logs/
+# NOTE: These MUST be anchored with a leading "/" so they only match the repo
+# root. BuildKit's .dockerignore uses .gitignore-style matching, so a bare
+# "config/" would also match "nodejs/src/config/" — which is application code
+# required at startup (auth.js → require('../config')). Excluding it caused
+# the container to crash-loop with "Cannot find module '../config'".
+/config/
+/data/
+/logs/
 
 # Deployment and setup scripts (not needed for build)
-deploy/
+/deploy/
 
 # Root-level deployment/setup scripts (not needed for build)
 # Note: scripts/ and docker/ directories are needed for build

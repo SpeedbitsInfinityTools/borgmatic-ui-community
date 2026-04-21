@@ -87,38 +87,79 @@ async function listArchiveEntries({ borgPath, repository, archive, basePath, env
 }
 
 function detectGitReposFromEntries(entries, basePath = '') {
+    // A Git repository in the archive is either:
+    //   a) a bare/mirror repo  -> directory whose name ends with ".git"
+    //   b) a working-copy clone -> any directory containing a ".git" subdir
+    //
+    // We scan at ANY depth, because users commonly back up trees like
+    // /home/user/repos/<org>/<project> or deeper, and the old heuristic
+    // (depth 1 or 2 only) missed every real Git backup that repos.sh
+    // produces.
     const dirs = new Map();
     const prefix = basePath ? basePath.replace(/\/$/, '') + '/' : '';
 
+    const stripPrefix = (p) => {
+        if (!prefix) return p;
+        return p.startsWith(prefix) ? p.slice(prefix.length) : p;
+    };
+
+    // First pass: collect clone-type repos from `.git` subdirectory entries.
+    // Given an entry like "a/b/project/.git", the parent "a/b/project" is a
+    // Git working copy. This has priority over any mirror detection for the
+    // same path.
     for (const item of entries) {
         if (item.type !== 'd') continue;
-
-        const itemPath = item.path;
-        const relative = prefix && itemPath.startsWith(prefix) ? itemPath.slice(prefix.length) : itemPath;
+        const relative = stripPrefix(item.path);
         if (!relative || relative.includes('..')) continue;
 
-        const isBareRepo = relative.endsWith('.git') && !relative.includes('/.git');
-        const segments = relative.split('/');
-        const isTopLevelDir = segments.length === 1;
-        const isGroupedRepo = segments.length === 2;
+        const isDotGit =
+            relative === '.git' ||
+            relative.endsWith('/.git');
+        if (!isDotGit) continue;
 
-        if (isBareRepo && (isTopLevelDir || isGroupedRepo)) {
-            dirs.set(relative, {
-                name: relative.replace(/\.git$/, ''),
-                path: itemPath,
-                type: 'mirror',
-                group: isGroupedRepo ? segments[0] : null,
-            });
-        } else if ((isTopLevelDir || isGroupedRepo) && !relative.includes('.')) {
-            if (!dirs.has(relative + '.git') && !dirs.has(relative)) {
-                dirs.set(relative, {
-                    name: relative,
-                    path: itemPath,
-                    type: 'clone',
-                    group: isGroupedRepo ? segments[0] : null,
-                });
-            }
-        }
+        const parentRel = relative === '.git' ? '' : relative.slice(0, -'/.git'.length);
+        const parentAbs = relative === '.git'
+            ? item.path.replace(/\/?\.git\/?$/, '')
+            : item.path.slice(0, -'/.git'.length);
+        if (!parentAbs) continue;
+
+        const segments = parentRel.split('/').filter(Boolean);
+        const repoName = segments.length ? segments[segments.length - 1] : parentAbs.split('/').filter(Boolean).pop() || 'repo';
+        const group = segments.length > 1 ? segments[segments.length - 2] : null;
+
+        dirs.set(parentAbs, {
+            name: repoName,
+            path: parentAbs,
+            type: 'clone',
+            group,
+        });
+    }
+
+    // Second pass: collect mirror/bare repos from any directory whose name
+    // ends with ".git", unless we've already seen a clone at that location.
+    for (const item of entries) {
+        if (item.type !== 'd') continue;
+        const relative = stripPrefix(item.path);
+        if (!relative || relative.includes('..')) continue;
+
+        // Skip if this is the `.git` subdir of a clone (handled above).
+        if (relative === '.git' || relative.endsWith('/.git')) continue;
+
+        if (!relative.endsWith('.git')) continue;
+
+        if (dirs.has(item.path)) continue;
+
+        const segments = relative.split('/').filter(Boolean);
+        const last = segments[segments.length - 1];
+        const repoName = last.replace(/\.git$/, '');
+        const group = segments.length > 1 ? segments[segments.length - 2] : null;
+
+        dirs.set(item.path, {
+            name: repoName,
+            path: item.path,
+            type: 'mirror',
+            group,
+        });
     }
 
     return Array.from(dirs.values());
@@ -175,55 +216,177 @@ router.post('/test', authenticateToken, requireAdmin, async (req, res) => {
         return res.status(400).json({ error: 'platform and pat are required' });
     }
 
-    try {
-        let url;
-        let authHeaders;
+    const redact = (text) => sanitizeSensitive(String(text || '').substring(0, 500), [pat]);
 
+    try {
         switch (platform) {
             case 'github': {
-                const owner = organization || user;
-                url = owner ? `https://api.github.com/orgs/${encodeURIComponent(owner)}` : 'https://api.github.com/user';
-                authHeaders = { Authorization: `token ${pat}`, Accept: 'application/vnd.github.v3+json' };
-                break;
+                // Mirror repos.sh preflight behaviour:
+                //   1) Validate the PAT itself via GET /user.
+                //   2) If an owner was provided, try /orgs/{owner}, and on 404
+                //      fall back to /users/{owner} (a personal account is not
+                //      an organization, so /orgs/* returns 404 — which is what
+                //      the user hit).
+                const authHeaders = {
+                    Authorization: `token ${pat}`,
+                    Accept: 'application/vnd.github.v3+json',
+                    'User-Agent': 'borgmatic-ui',
+                };
+
+                const userResp = await fetch('https://api.github.com/user', { headers: authHeaders });
+                if (!userResp.ok) {
+                    const detail = await userResp.text().catch(() => '');
+                    return res.status(400).json({
+                        error: `GitHub PAT is invalid (HTTP ${userResp.status})`,
+                        detail: redact(detail),
+                    });
+                }
+
+                const owner = (organization || user || '').trim();
+                if (!owner) {
+                    const me = await userResp.json().catch(() => ({}));
+                    return res.json({
+                        success: true,
+                        message: `Connection successful. Authenticated as ${me.login || 'user'}.`,
+                    });
+                }
+
+                const orgResp = await fetch(
+                    `https://api.github.com/orgs/${encodeURIComponent(owner)}`,
+                    { headers: authHeaders }
+                );
+                if (orgResp.ok) {
+                    return res.json({
+                        success: true,
+                        message: `Connection successful. Organization '${owner}' is accessible.`,
+                    });
+                }
+                if (orgResp.status === 404) {
+                    const userCheck = await fetch(
+                        `https://api.github.com/users/${encodeURIComponent(owner)}`,
+                        { headers: authHeaders }
+                    );
+                    if (userCheck.ok) {
+                        const acct = await userCheck.json().catch(() => ({}));
+                        const acctType = acct.type || 'User';
+                        return res.json({
+                            success: true,
+                            message: `Connection successful. '${owner}' is a GitHub ${acctType} account (not an organization).`,
+                        });
+                    }
+                    const detail = await userCheck.text().catch(() => '');
+                    return res.status(400).json({
+                        error: `'${owner}' was not found as a GitHub organization or user`,
+                        detail: redact(detail),
+                    });
+                }
+                const detail = await orgResp.text().catch(() => '');
+                return res.status(400).json({
+                    error: `Cannot access GitHub organization '${owner}' (HTTP ${orgResp.status}). The PAT may need SSO authorization or fine-grained access to this resource.`,
+                    detail: redact(detail),
+                });
             }
+
             case 'gitlab': {
                 const gitlabHost = (host || 'https://gitlab.com').replace(/\/$/, '');
-                url = `${gitlabHost}/api/v4/user`;
-                authHeaders = { 'PRIVATE-TOKEN': pat };
-                break;
+                const authHeaders = { 'PRIVATE-TOKEN': pat };
+
+                // 1) Validate the PAT via /user.
+                const r = await fetch(`${gitlabHost}/api/v4/user`, { headers: authHeaders });
+                if (!r.ok) {
+                    const detail = await r.text().catch(() => '');
+                    return res.status(400).json({
+                        error: `GitLab PAT is invalid (HTTP ${r.status})`,
+                        detail: redact(detail),
+                    });
+                }
+                const me = await r.json().catch(() => ({}));
+
+                // 2) If a group/user namespace was provided, verify it exists.
+                // GitLab namespaces cover both groups AND personal users with
+                // a single unified endpoint, so there is no org-vs-user trap
+                // like on GitHub.
+                const targetGroup = (group || user || '').trim();
+                if (targetGroup) {
+                    const nsResp = await fetch(
+                        `${gitlabHost}/api/v4/namespaces?search=${encodeURIComponent(targetGroup)}`,
+                        { headers: authHeaders }
+                    );
+                    if (nsResp.ok) {
+                        const namespaces = await nsResp.json().catch(() => []);
+                        const match = Array.isArray(namespaces)
+                            ? namespaces.find((n) => n.full_path === targetGroup || n.path === targetGroup)
+                            : null;
+                        if (!match) {
+                            return res.status(400).json({
+                                error: `GitLab namespace '${targetGroup}' was not found or is not visible to this PAT.`,
+                                detail: 'The PAT authenticates correctly, but no group or user namespace matches that name. If this is a group, ensure the PAT has access to it.',
+                            });
+                        }
+                        return res.json({
+                            success: true,
+                            message: `Connection successful. Authenticated as ${me.username || 'user'}; namespace '${match.full_path}' (${match.kind}) is accessible.`,
+                        });
+                    }
+                    // Namespaces endpoint failed for some other reason — don't
+                    // hard-fail, but report the PAT as valid.
+                }
+
+                return res.json({
+                    success: true,
+                    message: `Connection successful. Authenticated as ${me.username || 'user'} on ${gitlabHost}.`,
+                });
             }
+
             case 'bitbucket': {
                 if (!workspace || !bb_username) {
                     return res.status(400).json({ error: 'Bitbucket requires workspace and username/email' });
                 }
-                url = `https://api.bitbucket.org/2.0/repositories/${encodeURIComponent(workspace)}?pagelen=1`;
                 const authStr = Buffer.from(`${bb_username}:${pat}`).toString('base64');
-                authHeaders = { Authorization: `Basic ${authStr}` };
-                break;
+                const authHeaders = { Authorization: `Basic ${authStr}`, Accept: 'application/json' };
+                const r = await fetch(
+                    `https://api.bitbucket.org/2.0/repositories/${encodeURIComponent(workspace)}?pagelen=1`,
+                    { headers: authHeaders }
+                );
+                if (!r.ok) {
+                    const detail = await r.text().catch(() => '');
+                    return res.status(400).json({
+                        error: `Bitbucket authentication failed (HTTP ${r.status})`,
+                        detail: redact(detail),
+                    });
+                }
+                return res.json({
+                    success: true,
+                    message: `Connection successful. Workspace '${workspace}' is accessible.`,
+                });
             }
+
             case 'azure': {
                 if (!organization) {
                     return res.status(400).json({ error: 'Azure DevOps requires organization' });
                 }
-                url = `https://dev.azure.com/${encodeURIComponent(organization)}/_apis/projects?api-version=6.0&$top=1`;
                 const authStr = Buffer.from(`:${pat}`).toString('base64');
-                authHeaders = { Authorization: `Basic ${authStr}` };
-                break;
+                const authHeaders = { Authorization: `Basic ${authStr}`, Accept: 'application/json' };
+                const r = await fetch(
+                    `https://dev.azure.com/${encodeURIComponent(organization)}/_apis/projects?api-version=6.0&$top=1`,
+                    { headers: authHeaders }
+                );
+                if (!r.ok) {
+                    const detail = await r.text().catch(() => '');
+                    return res.status(400).json({
+                        error: `Azure DevOps authentication failed (HTTP ${r.status})`,
+                        detail: redact(detail),
+                    });
+                }
+                return res.json({
+                    success: true,
+                    message: `Connection successful. Organization '${organization}' is accessible.`,
+                });
             }
+
             default:
                 return res.status(400).json({ error: `Unsupported platform: ${platform}` });
         }
-
-        const response = await fetch(url, { headers: authHeaders });
-        if (!response.ok) {
-            const detail = await response.text().catch(() => '');
-            return res.status(400).json({
-                error: `Authentication failed (HTTP ${response.status})`,
-                detail: sanitizeSensitive(detail.substring(0, 500), [pat]),
-            });
-        }
-
-        res.json({ success: true, message: 'Connection successful. Credentials are valid.' });
     } catch (err) {
         res.status(500).json({ error: sanitizeSensitive(err.message || 'Connection test failed', [pat]) });
     }
@@ -435,19 +598,41 @@ async function createRemoteRepo(platform, repoName, opts) {
 }
 
 async function createGitHubRepo(repoName, { organization, user, pat }) {
-    const owner = organization || user;
-    const isOrg = !!organization;
-    const url = isOrg
-        ? `https://api.github.com/orgs/${encodeURIComponent(owner)}/repos`
-        : 'https://api.github.com/user/repos';
+    // The frontend exposes a single "Organization or Username" field, so we
+    // cannot trust `organization` to literally mean an org. Resolve which
+    // endpoint to hit by probing /orgs/{owner} first and falling back to the
+    // authenticated user's repo endpoint on 404 — matching the behaviour of
+    // the /test endpoint and scripts/repos.sh preflight.
+    const baseHeaders = {
+        Authorization: `token ${pat}`,
+        Accept: 'application/vnd.github.v3+json',
+        'User-Agent': 'borgmatic-ui',
+    };
 
-    const resp = await fetch(url, {
+    const owner = (organization || user || '').trim();
+    let createUrl = 'https://api.github.com/user/repos';
+    if (owner) {
+        const orgResp = await fetch(
+            `https://api.github.com/orgs/${encodeURIComponent(owner)}`,
+            { headers: baseHeaders }
+        );
+        if (orgResp.ok) {
+            createUrl = `https://api.github.com/orgs/${encodeURIComponent(owner)}/repos`;
+        } else if (orgResp.status === 404) {
+            // Personal account — repos are created under the authenticated user.
+            // GitHub will reject the request if the PAT does not actually own
+            // this user namespace, so there's no risk of creating a repo under
+            // the wrong account.
+            createUrl = 'https://api.github.com/user/repos';
+        } else {
+            const body = await orgResp.text().catch(() => '');
+            throw new Error(`Cannot access GitHub owner '${owner}' (HTTP ${orgResp.status}): ${body.substring(0, 300)}`);
+        }
+    }
+
+    const resp = await fetch(createUrl, {
         method: 'POST',
-        headers: {
-            Authorization: `token ${pat}`,
-            Accept: 'application/vnd.github.v3+json',
-            'Content-Type': 'application/json',
-        },
+        headers: { ...baseHeaders, 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: repoName, private: true }),
     });
 

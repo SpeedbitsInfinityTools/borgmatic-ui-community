@@ -132,9 +132,33 @@ async function getBackupJobMapping(repositoryPath) {
     try {
         const config = require('../config');
         const backupsDir = path.join(config.configDir, 'borgmatic.d');
+        const metadataPath = path.join(config.configDir, 'backups-metadata.yaml');
+
+        // Load backups-metadata.yaml so we can map YAML files back to their
+        // user-facing display names (same names that /api/backups returns).
+        // Without this, Git Restore / other UI features can't correlate an
+        // archive's backup_job with a backup config.
+        let filenameToDisplayName = {};
+        try {
+            if (await fs.pathExists(metadataPath)) {
+                const metaContent = await fs.readFile(metadataPath, 'utf8');
+                const metaParsed = yaml.load(metaContent) || {};
+                for (const meta of metaParsed.backups || []) {
+                    if (meta && meta.filename && meta.name) {
+                        filenameToDisplayName[meta.filename] = meta.name;
+                    }
+                }
+            }
+        } catch (e) {
+            console.warn('⚠️  Failed to load backups-metadata.yaml for job mapping:', e.message);
+        }
 
         const files = await fs.readdir(backupsDir);
-        const yamlFiles = files.filter(f => f.endsWith('.yaml') || f.endsWith('.yml'));
+        const yamlFiles = files.filter(f =>
+            (f.endsWith('.yaml') || f.endsWith('.yml')) &&
+            !f.startsWith('git-job-') &&
+            !f.startsWith('git-keys-')
+        );
 
         const mapping = {};
 
@@ -151,16 +175,18 @@ async function getBackupJobMapping(repositoryPath) {
             );
 
             if (usesRepo) {
-                const backupJobName = path.basename(file, path.extname(file));
+                // Prefer the display name from backups-metadata.yaml so this
+                // mapping aligns with the name exposed by /api/backups. Fall
+                // back to the filename stem for discovered (non-UI) configs.
+                const fileStem = path.basename(file, path.extname(file));
+                const displayName = filenameToDisplayName[file] || fileStem;
 
-                // Get archive_name_format to determine prefix
                 // Default format is {hostname}-{now}
                 const archiveFormat = parsed?.archive_name_format || '{hostname}-{now}';
 
-                // If it's the default format, we can't determine the prefix
-                // So we store the backup job name anyway for manual matching
-                mapping[backupJobName] = {
-                    name: backupJobName,
+                mapping[displayName] = {
+                    name: displayName,
+                    filename: file,
                     format: archiveFormat
                 };
             }

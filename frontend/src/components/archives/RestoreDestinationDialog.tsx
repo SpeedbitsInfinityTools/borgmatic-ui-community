@@ -52,10 +52,13 @@ const RestoreDestinationDialog: React.FC<RestoreDestinationDialogProps> = ({
   const [preserveStructure, setPreserveStructure] = useState(true);
   const [searchFilter, setSearchFilter] = useState('');
 
-  // Reset state when dialog opens - start at /host
+  // Reset state when dialog opens - start at root; the backend tells us
+  // whether we're running inside Docker (in_docker) and lists the allowed
+  // roots as virtual entries for Docker installs, or the real filesystem
+  // root for host installs.
   useEffect(() => {
     if (isOpen) {
-      setCurrentPath('/host');
+      setCurrentPath('/');
       setNewFolderName('');
       setShowNewFolderInput(false);
       setPreserveStructure(true);
@@ -121,6 +124,7 @@ const RestoreDestinationDialog: React.FC<RestoreDestinationDialogProps> = ({
   const parentPath = browseData?.data?.data?.parent_path;
   const isWritable = browseData?.data?.data?.is_writable ?? false;
   const canCreate = browseData?.data?.data?.can_create ?? false;
+  const inDocker = browseData?.data?.data?.in_docker ?? true;
 
   // Filter items based on search
   const filteredItems = items.filter(item => 
@@ -199,13 +203,13 @@ const RestoreDestinationDialog: React.FC<RestoreDestinationDialogProps> = ({
           </div>
         </div>
 
-        {/* Docker host filesystem info banner */}
-        {currentPath === '/' && (
+        {/* Docker host filesystem info banner - only shown when actually running in Docker */}
+        {currentPath === '/' && inDocker && (
           <div className="px-6 py-2 bg-blue-50 border-b border-blue-100 flex-shrink-0">
             <p className="text-xs text-blue-700 flex items-center">
               <Info className="w-3.5 h-3.5 mr-1.5 flex-shrink-0" />
               <span>
-                <strong>Running in Docker?</strong> Your host filesystem is mounted at{' '}
+                <strong>Running in Docker.</strong> Your host filesystem is mounted at{' '}
                 <button
                   onClick={() => navigateTo('/host')}
                   className="text-blue-600 hover:underline font-mono"

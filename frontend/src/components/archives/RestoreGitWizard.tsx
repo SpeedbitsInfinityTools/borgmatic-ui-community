@@ -252,20 +252,36 @@ const RestoreGitWizard: React.FC<RestoreGitWizardProps> = ({
                   </div>
 
                   <div className="border border-gray-200 rounded-lg max-h-80 overflow-y-auto divide-y divide-gray-100">
-                    {filteredRepos.map(repo => (
-                      <label key={repo.path} className="flex items-center gap-3 px-3 py-2 hover:bg-gray-50 cursor-pointer">
-                        <button type="button" onClick={() => toggleRepo(repo.path)} className="text-purple-600">
-                          {selectedRepos.has(repo.path) ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4 text-gray-300" />}
-                        </button>
-                        <div className="flex-1 min-w-0">
-                          <span className="text-sm font-medium text-gray-900 truncate block">{repo.name}</span>
-                          {repo.group && <span className="text-[10px] text-gray-400">{repo.group}/</span>}
+                    {filteredRepos.map(repo => {
+                      const checked = selectedRepos.has(repo.path);
+                      return (
+                        <div
+                          key={repo.path}
+                          role="checkbox"
+                          tabIndex={0}
+                          aria-checked={checked}
+                          onClick={() => toggleRepo(repo.path)}
+                          onKeyDown={(e) => {
+                            if (e.key === ' ' || e.key === 'Enter') {
+                              e.preventDefault();
+                              toggleRepo(repo.path);
+                            }
+                          }}
+                          className="flex items-center gap-3 px-3 py-2 hover:bg-gray-50 cursor-pointer select-none focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-inset"
+                        >
+                          <span className="text-purple-600 flex-shrink-0">
+                            {checked ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4 text-gray-300" />}
+                          </span>
+                          <div className="flex-1 min-w-0">
+                            <span className="text-sm font-medium text-gray-900 truncate block">{repo.name}</span>
+                            {repo.group && <span className="text-[10px] text-gray-400">{repo.group}/</span>}
+                          </div>
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded ${repo.type === 'mirror' ? 'bg-blue-100 text-blue-700' : 'bg-green-100 text-green-700'}`}>
+                            {repo.type}
+                          </span>
                         </div>
-                        <span className={`text-[10px] px-1.5 py-0.5 rounded ${repo.type === 'mirror' ? 'bg-blue-100 text-blue-700' : 'bg-green-100 text-green-700'}`}>
-                          {repo.type}
-                        </span>
-                      </label>
-                    ))}
+                      );
+                    })}
                     {filteredRepos.length === 0 && (
                       <div className="px-3 py-8 text-center text-sm text-gray-400">No repositories found</div>
                     )}

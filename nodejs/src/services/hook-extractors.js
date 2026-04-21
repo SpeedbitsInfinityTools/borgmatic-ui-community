@@ -115,19 +115,39 @@ function extractGitRepoSourcesFromHooks(config) {
     }
     const marker = 'BORGMATIC_UI_GIT_META_B64:';
 
+    let hasReposShWithoutMarker = false;
     for (const hook of hooks) {
-        if (typeof hook !== 'string' || !hook.includes(marker)) continue;
-        try {
-            const line = hook.split('\n').find((l) => l.includes(marker));
-            if (!line) continue;
-            const encoded = line.substring(line.indexOf(marker) + marker.length).trim();
-            const parsed = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
-            if (parsed?.type === 'git_repos') {
-                sources.push(parsed);
+        if (typeof hook !== 'string') continue;
+        if (hook.includes(marker)) {
+            try {
+                const line = hook.split('\n').find((l) => l.includes(marker));
+                if (!line) continue;
+                const encoded = line.substring(line.indexOf(marker) + marker.length).trim();
+                const parsed = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
+                if (parsed?.type === 'git_repos') {
+                    sources.push(parsed);
+                }
+            } catch (e) {
+                // Ignore malformed metadata
             }
-        } catch (e) {
-            // Ignore malformed metadata
+        } else if (/repos\.sh\b/.test(hook) && /--backup\b/.test(hook)) {
+            // Older or externally-edited configs that invoke repos.sh without
+            // the JSON metadata marker. We can't reconstruct full wizard state
+            // from them, but we still want the UI to recognize this as a Git
+            // backup (e.g. to expose the Git Restore button).
+            hasReposShWithoutMarker = true;
         }
+    }
+
+    if (sources.length === 0 && hasReposShWithoutMarker) {
+        sources.push({
+            type: 'git_repos',
+            platform: 'unknown',
+            scope: 'unknown',
+            backup_type: 'unknown',
+            repo_selection: 'all',
+            _fallback: true,
+        });
     }
     return sources;
 }

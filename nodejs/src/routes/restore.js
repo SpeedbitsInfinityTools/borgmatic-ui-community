@@ -20,18 +20,31 @@ const restoreJobs = new Map();
 // ============================================================================
 // Restore path safety: restrict browsing/restores to allowed roots
 // ============================================================================
-// Includes both legacy paths (/opt/speedbits) and new Docker mount paths (/backup-source, /backup-destination)
-const DEFAULT_RESTORE_ALLOWED_ROOTS = ['/host', '/opt/speedbits-backup', '/opt/speedbits', '/backup-source', '/backup-destination', '/tmp'];
+// In Docker, the host filesystem is bind-mounted at /host and we only want to
+// expose a small set of known directories. When running the backend directly
+// on a host (dev / non-Docker installs), the admin reasonably expects to see
+// the full filesystem (e.g. /home, /mnt, /etc) just like a normal file manager.
+const DOCKER_RESTORE_ALLOWED_ROOTS = ['/host', '/opt/speedbits-backup', '/opt/speedbits', '/backup-source', '/backup-destination', '/tmp'];
+const HOST_RESTORE_ALLOWED_ROOTS = ['/'];
+
+function isRunningInDocker() {
+    try {
+        return fs.existsSync('/.dockerenv');
+    } catch (_) {
+        return false;
+    }
+}
 
 function getRestoreAllowedRoots() {
     const raw = process.env.RESTORE_ALLOWED_ROOTS;
-    if (!raw) return DEFAULT_RESTORE_ALLOWED_ROOTS;
-
-    return raw
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean)
-        .map((p) => path.resolve(p));
+    if (raw) {
+        return raw
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .map((p) => path.resolve(p));
+    }
+    return isRunningInDocker() ? DOCKER_RESTORE_ALLOWED_ROOTS : HOST_RESTORE_ALLOWED_ROOTS;
 }
 
 function isUnderAllowedRoots(targetPath) {
@@ -40,6 +53,10 @@ function isUnderAllowedRoots(targetPath) {
 
     return roots.some((root) => {
         const r = path.resolve(root);
+        // Root "/" is a special case: any absolute path is under it.
+        // Without this, r + path.sep becomes "//" and startsWith fails for
+        // every real path (e.g. "/home".startsWith("//") === false).
+        if (r === path.sep) return true;
         // exact match or within subtree
         return resolved === r || resolved.startsWith(r + path.sep);
     });
@@ -1257,10 +1274,15 @@ router.get('/browse-filesystem', authenticateToken, requireAdmin, async (req, re
         // Resolve to absolute path
         const absolutePath = path.resolve(browsePath);
 
-        // Special case: browsing root "/" - show only allowed roots as virtual entries
-        if (absolutePath === '/') {
+        const allowedRootsForBrowse = getRestoreAllowedRoots();
+        const rootIsAllowed = allowedRootsForBrowse.some((r) => path.resolve(r) === '/');
+
+        // Special case: browsing root "/" - show only allowed roots as virtual entries,
+        // UNLESS "/" itself is an allowed root (non-Docker mode), in which case we fall
+        // through to the normal directory listing below.
+        if (absolutePath === '/' && !rootIsAllowed) {
             console.log(`📂 [Filesystem] Browsing root - showing allowed roots`);
-            const allowedRoots = getRestoreAllowedRoots();
+            const allowedRoots = allowedRootsForBrowse;
             const items = [];
 
             for (const rootPath of allowedRoots) {
@@ -1295,7 +1317,8 @@ router.get('/browse-filesystem', authenticateToken, requireAdmin, async (req, re
                     parent_path: null,
                     is_writable: false,
                     items: items,
-                    can_create: false
+                    can_create: false,
+                    in_docker: isRunningInDocker()
                 }
             });
         }
@@ -1377,7 +1400,8 @@ router.get('/browse-filesystem', authenticateToken, requireAdmin, async (req, re
                 parent_path: parentPath,
                 is_writable: isWritable,
                 items: items.filter(i => i.type === 'directory'), // Only show directories for destination selection
-                can_create: isWritable
+                can_create: isWritable,
+                in_docker: isRunningInDocker()
             }
         });
     } catch (error) {

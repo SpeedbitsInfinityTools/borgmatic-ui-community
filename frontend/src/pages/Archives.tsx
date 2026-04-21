@@ -274,6 +274,28 @@ const Archives = () => {
     return set;
   }, [backupsData]);
 
+  // Fallback: when multiple backup jobs share the same borg repo with the
+  // same archive_name_format, we can't tell from an archive name alone which
+  // job created it. Remember the borg repo paths that host AT LEAST ONE Git
+  // backup, so we can still offer the Git Restore button on every archive in
+  // those repositories. The wizard scans the archive itself and will show an
+  // empty state if no Git content is present - no harm done.
+  const gitBackupRepoPaths = useMemo(() => {
+    const raw = backupsData?.data?.backups ?? backupsData?.data ?? [];
+    const backups = Array.isArray(raw) ? raw : [];
+    const set = new Set<string>();
+    for (const b of backups) {
+      const hasGit = (b.sources_summary || []).some((s: any) => s.type === 'git_repos');
+      if (!hasGit) continue;
+      const repos = b.repositories_summary || b.config?.repositories || [];
+      for (const r of repos) {
+        const p = typeof r === 'string' ? r : r?.path;
+        if (p) set.add(String(p));
+      }
+    }
+    return set;
+  }, [backupsData]);
+
   const borgVersion = toolsHealth?.tools?.borg?.version || '';
   const isBorg2 = borgVersion.startsWith('2.');
 
@@ -416,7 +438,10 @@ const Archives = () => {
               onViewArchive={(archiveName) => setViewingArchive({ repoId: repo.path, archiveName })}
               onRestoreArchive={(archiveName) => setRestoringArchive({ repoPath: repo.path, archiveName })}
               onGitRestore={(archiveName) => setGitRestoreTarget({ repoPath: repo.path, archiveName })}
-              isGitBackupJob={(backupJobName) => gitBackupJobNames.has(String(backupJobName).toLowerCase())}
+              isGitBackupJob={(backupJobName) =>
+                gitBackupJobNames.has(String(backupJobName).toLowerCase()) ||
+                gitBackupRepoPaths.has(repo.path)
+              }
               onEnterPassphrase={() => setPassphraseModal({ repoId: repo.id, repoPath: repo.path })}
               isBorg2={isBorg2}
               timeFilter={timeFilter}
