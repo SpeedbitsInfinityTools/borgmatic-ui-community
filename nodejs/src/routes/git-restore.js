@@ -39,6 +39,36 @@ function validateRepoName(name) {
     return typeof name === 'string' && name.length > 0 && name.length <= 200 && /^[A-Za-z0-9._-]+$/.test(name);
 }
 
+/**
+ * Normalize a platform identifier (org / user / workspace / group) that
+ * a user types into the wizard. Strips common paste artefacts — trailing
+ * slashes, leading '@', or a pasted URL — so that e.g.
+ * "SpeedbitsInfinityTools/" or "https://github.com/SpeedbitsInfinityTools"
+ * collapse down to "SpeedbitsInfinityTools" before they reach the API.
+ * Kept intentionally conservative: does not change the inner value, only
+ * removes well-known surrounding cruft.
+ */
+function normalizePlatformIdentifier(value) {
+    if (value === undefined || value === null) return value;
+    let v = String(value).trim();
+    if (!v) return v;
+
+    const urlLike = /^(https?:\/\/|[a-z0-9.-]+\.[a-z]{2,}\/)/i.test(v);
+    if (urlLike) {
+        const cleaned = v.replace(/^https?:\/\//i, '');
+        const parts = cleaned.split('/').filter(Boolean);
+        const orgIdx = parts.findIndex(p => p.toLowerCase() === 'organizations');
+        if (orgIdx >= 0 && parts[orgIdx + 1]) {
+            v = parts[orgIdx + 1];
+        } else if (parts.length >= 2) {
+            v = parts[1];
+        }
+    }
+
+    v = v.replace(/^@+/, '').replace(/\/+$/, '').trim();
+    return v;
+}
+
 function sanitizeSensitive(text, secrets = []) {
     let out = String(text || '');
     for (const secret of secrets.filter(Boolean)) {
@@ -210,11 +240,23 @@ router.get('/scan', authenticateToken, async (req, res) => {
 });
 
 router.post('/test', authenticateToken, requireAdmin, async (req, res) => {
-    const { platform, organization, user, workspace, host, pat, bb_username } = req.body;
+    const {
+        platform,
+        organization: rawOrganization,
+        user: rawUser,
+        workspace: rawWorkspace,
+        host,
+        pat,
+        bb_username,
+    } = req.body;
 
     if (!platform || !pat) {
         return res.status(400).json({ error: 'platform and pat are required' });
     }
+
+    const organization = normalizePlatformIdentifier(rawOrganization);
+    const user = normalizePlatformIdentifier(rawUser);
+    const workspace = normalizePlatformIdentifier(rawWorkspace);
 
     const redact = (text) => sanitizeSensitive(String(text || '').substring(0, 500), [pat]);
 

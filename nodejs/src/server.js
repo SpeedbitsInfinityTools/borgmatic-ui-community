@@ -8,6 +8,29 @@ const authService = require('./services/auth');
 const config = require('./config');
 const { initRedis } = require('./services/redis-client');
 
+// -----------------------------------------------------------------------------
+// SSH host-key policy for borg/borgmatic invocations
+// -----------------------------------------------------------------------------
+// We run non-interactively, so OpenSSH's default `StrictHostKeyChecking=ask`
+// for unknown hosts degrades to `yes` (= reject) and the user sees:
+//   Remote: Host key verification failed.
+//   Connection closed by remote host. Is borg working on the server?
+// whenever `borg` needs to contact a host whose key isn't yet in known_hosts.
+//
+// Setting `accept-new` means:
+//   - First connection to a new host: auto-accept and pin the key.
+//   - Subsequent connections: verify against the pinned key; reject on mismatch.
+// This is the only sensible default for a daemon process; an attacker who wants
+// to MITM must still beat the initial trust-on-first-use, which is the same
+// threat model as a human admin manually running `ssh-keyscan` once.
+//
+// We only set this if the admin hasn't already exported BORG_RSH themselves,
+// so explicit configuration (custom ssh binary, extra flags, known_hosts path)
+// always wins.
+if (!process.env.BORG_RSH) {
+    process.env.BORG_RSH = 'ssh -o StrictHostKeyChecking=accept-new';
+}
+
 // Get app version from package.json
 const getAppVersion = () => {
     try {
