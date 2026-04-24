@@ -4,6 +4,7 @@ const { authenticateToken, requireAdmin } = require('../middleware/auth');
 const passwordManager = require('../services/password-manager');
 const configParser = require('../services/config-parser');
 const { getBorgPath } = require('../services/borg-version-detector');
+const { configureBorgSshEnv } = require('../services/borg-ssh-env');
 const fs = require('fs-extra');
 const path = require('path');
 const os = require('os');
@@ -82,7 +83,7 @@ async function getConfiguredRepository(repositoryPath) {
     return allRepos.find((r) => r.path === repositoryPath) || null;
 }
 
-async function buildBorgEnv(repositoryPath) {
+async function buildBorgEnv(repositoryPath, context = 'Git Restore') {
     const env = { ...process.env };
     try {
         const passphrase = await passwordManager.getRepositoryPassphrase(repositoryPath);
@@ -90,6 +91,11 @@ async function buildBorgEnv(repositoryPath) {
     } catch {
         // ignore missing passphrase
     }
+    // Set up SSH auth for ssh:// repos (key/password from per-repo credentials).
+    // Without this, `borg list`/`borg extract` against an SSH repo like Hetzner
+    // would fall back to the global BORG_RSH default with no key attached and
+    // fail with `Permission denied (publickey,password)`.
+    await configureBorgSshEnv(env, repositoryPath, context);
     return env;
 }
 
@@ -205,7 +211,7 @@ async function scanArchiveForGitRepos({ repository, archive, basePath }) {
 
     const borgVersion = repo.borg_version || '1.x';
     const borgPath = getBorgPath(borgVersion);
-    const env = await buildBorgEnv(repository);
+    const env = await buildBorgEnv(repository, 'Git Restore Scan');
 
     const entries = await listArchiveEntries({ borgPath, repository, archive, basePath, env });
     return detectGitReposFromEntries(entries, basePath || '');
@@ -507,7 +513,7 @@ router.post('/execute', authenticateToken, requireAdmin, async (req, res) => {
 
             const borgVersion = configuredRepo.borg_version || '1.x';
             const borgPath = getBorgPath(borgVersion);
-            const borgEnv = await buildBorgEnv(String(repository));
+            const borgEnv = await buildBorgEnv(String(repository), 'Git Restore Extract');
             tmpBase = await fs.mkdtemp(path.join(os.tmpdir(), 'git-restore-'));
 
             for (const repo of selectedRepos) {
