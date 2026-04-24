@@ -564,6 +564,72 @@ run_git() {
 }
 
 # ============================================================================
+# TARGET FILESYSTEM PROBE
+# ============================================================================
+#
+# Determines whether the target directory supports chmod(). Some network
+# mounts — notably CIFS/SMB without the `noperm` option and NFS exports with
+# root_squash — reject chmod() with EPERM, which makes `git clone` abort
+# during `git init` (it chmods `config.lock`). When that happens we stage
+# the clone locally and tar-copy the result onto the target; when chmod is
+# supported we skip staging entirely and clone directly (zero overhead).
+#
+# Results are cached per-parent-directory so a 150-repo job does the probe
+# once, not 150 times.
+
+# Associative array cache is available on Bash >= 4.
+# On older Bash (e.g. macOS system bash 3.2), we gracefully disable caching.
+GIT_TARGET_CHMOD_CACHE_SUPPORTED=0
+if [[ -n "${BASH_VERSINFO:-}" && "${BASH_VERSINFO[0]:-0}" -ge 4 ]]; then
+  declare -A GIT_TARGET_CHMOD_CACHE
+  GIT_TARGET_CHMOD_CACHE_SUPPORTED=1
+fi
+
+# Probe a directory's chmod() support.
+# Args:   $1 = directory path (will be created if missing)
+# Prints: "ok"     if the directory is usable and chmod works
+#         "noperm" if writable but chmod returns EPERM (staging required)
+#         "error"  if the directory cannot be created or is not writable
+# Side effect: populates GIT_TARGET_CHMOD_CACHE[$1].
+probe_target_chmod() {
+  local dir="$1"
+
+  if [[ "$GIT_TARGET_CHMOD_CACHE_SUPPORTED" -eq 1 && -n "${GIT_TARGET_CHMOD_CACHE[$dir]:-}" ]]; then
+    echo "${GIT_TARGET_CHMOD_CACHE[$dir]}"
+    return 0
+  fi
+
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    if [[ "$GIT_TARGET_CHMOD_CACHE_SUPPORTED" -eq 1 ]]; then
+      GIT_TARGET_CHMOD_CACHE[$dir]="error"
+    fi
+    echo "error"
+    return 0
+  fi
+
+  local probe_file
+  probe_file="$(mktemp "${dir}/.borgmatic-git-probe.XXXXXX" 2>/dev/null)" || {
+    if [[ "$GIT_TARGET_CHMOD_CACHE_SUPPORTED" -eq 1 ]]; then
+      GIT_TARGET_CHMOD_CACHE[$dir]="error"
+    fi
+    echo "error"
+    return 0
+  }
+
+  local result="ok"
+  if ! chmod 0600 "$probe_file" 2>/dev/null; then
+    result="noperm"
+  fi
+
+  rm -f "$probe_file" 2>/dev/null || true
+
+  if [[ "$GIT_TARGET_CHMOD_CACHE_SUPPORTED" -eq 1 ]]; then
+    GIT_TARGET_CHMOD_CACHE[$dir]="$result"
+  fi
+  echo "$result"
+}
+
+# ============================================================================
 # GENERIC GIT BACKUP FUNCTION
 # ============================================================================
 
@@ -686,32 +752,120 @@ backup_git_repo() {
     fi
   else
     echo "Cloning: $group / $repo_name"
-    mkdir -p "$(dirname "$repo_dir")"
-    
-    if [[ "$BACKUP_TYPE" == "mirror" ]]; then
-      if ! run_git "$use_header_auth" clone --mirror "$auth_url" "$repo_dir"; then
-        echo "ERROR: Clone failed for $repo_name"
-        rm -rf "$repo_dir"
-        track_failure "$group/$repo_name" "clone failed"
-      else
-        track_success "$group/$repo_name"
-      fi
-    else
-      if ! run_git "$use_header_auth" clone "$auth_url" "$repo_dir"; then
-        # Check if clone succeeded but checkout failed (e.g., case-sensitivity issues)
-        if [[ -d "$repo_dir/.git" ]]; then
-          echo "Warning: Clone succeeded but checkout had issues (case-sensitivity collision?)"
-          echo "  Repository data is intact at: $repo_dir"
-          track_success "$group/$repo_name"
-        else
+    local parent_dir
+    parent_dir="$(dirname "$repo_dir")"
+    mkdir -p "$parent_dir"
+
+    # Decide whether to clone directly into the target or to stage via a
+    # local POSIX directory first. CIFS/SMB without `noperm` and root-squashed
+    # NFS exports reject chmod() with EPERM, which makes `git clone` abort
+    # during `git init` (it chmods config.lock):
+    #   error: chmod on .../config.lock failed: Operation not permitted
+    #   fatal: could not set 'core.filemode' to 'false'
+    # We probe the target once per parent-directory and cache the verdict.
+    # When chmod works, we clone straight to the target with no extra copy.
+    # When it doesn't, we clone into $BORGMATIC_GIT_STAGE_DIR (default /tmp)
+    # and tar-pipe the result onto the target, which never issues chmod
+    # against the NAS. Either way, subsequent `git fetch` updates run
+    # directly against the target (fetch doesn't rewrite config).
+    local probe_result
+    probe_result="$(probe_target_chmod "$parent_dir")"
+
+    if [[ "$probe_result" == "error" ]]; then
+      echo "ERROR: Cannot create or write to target directory: $parent_dir"
+      track_failure "$group/$repo_name" "target not writable"
+      return
+    fi
+
+    if [[ "$probe_result" == "ok" ]]; then
+      # Direct clone into the target (POSIX-compliant filesystem).
+      if [[ "$BACKUP_TYPE" == "mirror" ]]; then
+        if ! run_git "$use_header_auth" clone --mirror "$auth_url" "$repo_dir"; then
           echo "ERROR: Clone failed for $repo_name"
           rm -rf "$repo_dir"
           track_failure "$group/$repo_name" "clone failed"
+          return
         fi
       else
-        track_success "$group/$repo_name"
+        if ! run_git "$use_header_auth" clone "$auth_url" "$repo_dir"; then
+          if [[ -d "$repo_dir/.git" ]]; then
+            echo "Warning: Clone succeeded but checkout had issues (case-sensitivity collision?)"
+          else
+            echo "ERROR: Clone failed for $repo_name"
+            rm -rf "$repo_dir"
+            track_failure "$group/$repo_name" "clone failed"
+            return
+          fi
+        fi
+      fi
+      track_success "$group/$repo_name"
+      return
+    fi
+
+    # probe_result == "noperm": target filesystem doesn't accept chmod().
+    # Stage the clone locally, then tar-copy onto the target.
+    # Staging location can be overridden with BORGMATIC_GIT_STAGE_DIR for
+    # hosts where /tmp is too small for a large initial clone.
+    if [[ -z "${_GIT_STAGING_WARNED:-}" ]]; then
+      echo "Note: Target directory does not accept chmod() (likely CIFS/SMB" \
+           "without 'noperm', or root-squashed NFS). Initial clones will be" \
+           "staged via ${BORGMATIC_GIT_STAGE_DIR:-/tmp}. Subsequent fetches" \
+           "run directly against the target and are unaffected."
+      _GIT_STAGING_WARNED=1
+    fi
+
+    local stage_parent stage_dir stage_repo
+    stage_parent="${BORGMATIC_GIT_STAGE_DIR:-/tmp}"
+    if ! mkdir -p "$stage_parent"; then
+      echo "ERROR: Cannot create staging directory parent: $stage_parent"
+      track_failure "$group/$repo_name" "staging parent not writable"
+      return
+    fi
+    if ! stage_dir=$(mktemp -d "${stage_parent}/borgmatic-git-clone-XXXXXX"); then
+      echo "ERROR: Cannot create staging directory in: $stage_parent"
+      track_failure "$group/$repo_name" "staging dir create failed"
+      return
+    fi
+    stage_repo="$stage_dir/repo"
+
+    # Always clean up staging, even on early return.
+    _cleanup_stage() { rm -rf "$stage_dir"; }
+
+    if [[ "$BACKUP_TYPE" == "mirror" ]]; then
+      if ! run_git "$use_header_auth" clone --mirror "$auth_url" "$stage_repo"; then
+        echo "ERROR: Clone failed for $repo_name"
+        _cleanup_stage
+        track_failure "$group/$repo_name" "clone failed"
+        return
+      fi
+    else
+      if ! run_git "$use_header_auth" clone "$auth_url" "$stage_repo"; then
+        if [[ ! -d "$stage_repo/.git" ]]; then
+          echo "ERROR: Clone failed for $repo_name"
+          _cleanup_stage
+          track_failure "$group/$repo_name" "clone failed"
+          return
+        fi
+        echo "Warning: Clone succeeded but checkout had issues (case-sensitivity collision?)"
       fi
     fi
+
+    # Move staged repo onto the target WITHOUT preserving mode bits — the
+    # chmod() attempt is what triggers EPERM on restricted NAS mounts.
+    # `tar --no-same-permissions --no-same-owner` is portable to both
+    # BusyBox and GNU tar.
+    if ! (cd "$stage_repo" && tar cf - .) \
+          | (mkdir -p "$repo_dir" && cd "$repo_dir" \
+             && tar xf - --no-same-permissions --no-same-owner); then
+      echo "ERROR: Failed to move staged clone to $repo_dir"
+      rm -rf "$repo_dir" 2>/dev/null || true
+      _cleanup_stage
+      track_failure "$group/$repo_name" "move to target failed"
+      return
+    fi
+
+    _cleanup_stage
+    track_success "$group/$repo_name"
   fi
 }
 
