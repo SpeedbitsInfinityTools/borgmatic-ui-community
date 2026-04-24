@@ -754,7 +754,11 @@ backup_git_repo() {
     echo "Cloning: $group / $repo_name"
     local parent_dir
     parent_dir="$(dirname "$repo_dir")"
-    mkdir -p "$parent_dir"
+    if ! mkdir -p "$parent_dir"; then
+      echo "ERROR: Cannot create target parent directory: $parent_dir"
+      track_failure "$group/$repo_name" "target parent create failed"
+      return
+    fi
 
     # Decide whether to clone directly into the target or to stage via a
     # local POSIX directory first. CIFS/SMB without `noperm` and root-squashed

@@ -218,7 +218,8 @@ COPY --chown=node:node --from=frontend-builder /build/frontend/build ./public
 COPY --chown=node:node docker/start.sh /app/start.sh
 RUN chmod +x /app/start.sh
 
-# Copy entrypoint script (runs as root to fix permissions, then drops to node)
+# Copy entrypoint script (runs as root, fixes permissions, then execs as
+# the user selected via BORGMATIC_UI_RUN_AS env var; default is 'node').
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
@@ -255,7 +256,8 @@ LABEL io.borgmatic.ui.build="single-image" \
     org.opencontainers.image.vendor="SpeedBits" \
     org.opencontainers.image.version="${VERSION}"
 
-# Container starts as root, entrypoint fixes permissions then drops to 'node' user
-# This ensures bind-mounted volumes have correct ownership even if host creates them as root
+# Container starts as root; entrypoint fixes permissions on /app/{config,data,logs}
+# and then executes the main command as the user selected via BORGMATIC_UI_RUN_AS
+# (default: 'node' for backward compatibility). See docker/entrypoint.sh.
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["/app/start.sh"]
