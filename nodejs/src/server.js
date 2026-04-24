@@ -31,6 +31,23 @@ if (!process.env.BORG_RSH) {
     process.env.BORG_RSH = 'ssh -o StrictHostKeyChecking=accept-new';
 }
 
+// `accept-new` wants to append the pinned key to ~/.ssh/known_hosts. If that
+// directory doesn't exist (fresh container, non-root user, etc.) ssh prints
+// `Failed to add the host to the list of known hosts`. The warning is cosmetic
+// — accept-new still lets the current connection proceed — but it confuses
+// users reading the log output and can mask real errors next to it.
+try {
+    const home = process.env.HOME || '/root';
+    const sshDir = path.join(home, '.ssh');
+    if (!fs.existsSync(sshDir)) {
+        fs.mkdirSync(sshDir, { recursive: true, mode: 0o700 });
+    } else {
+        try { fs.chmodSync(sshDir, 0o700); } catch (_e) { /* best-effort */ }
+    }
+} catch (e) {
+    console.warn('Could not ensure ~/.ssh exists:', e.message);
+}
+
 // Get app version from package.json
 const getAppVersion = () => {
     try {

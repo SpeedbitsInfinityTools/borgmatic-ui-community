@@ -7,6 +7,7 @@ const { promisify } = require('util');
 const passwordManager = require('../services/password-manager');
 const configParser = require('../services/config-parser');
 const repositoryCredentials = require('../services/repository-credentials');
+const { configureBorgSshEnv } = require('../services/borg-ssh-env');
 const path = require('path');
 const fs = require('fs-extra');
 const yaml = require('js-yaml');
@@ -234,60 +235,7 @@ router.get('/:repositoryPath/:archiveName/info', authenticateToken, async (req, 
         const borgVersion = repo?.borg_version || '1.x'; // Default to 1.x for existing repos
         const borgPath = getBorgPath(borgVersion);
 
-        // Set up SSH authentication if this is an SSH repository
-        const isSSHRepo = repositoryPath.startsWith('ssh://');
-        if (isSSHRepo && repo) {
-            const authMethod = repo.ssh_auth_method || (repo.ssh_key_id ? 'key' : 'password');
-
-            if (authMethod === 'key' && repo.ssh_key_id) {
-                try {
-                    const sshKeysAPI = require('../services/ssh-keys');
-                    const sshKey = await sshKeysAPI.getSSHKey(repo.ssh_key_id);
-
-                    if (sshKey && sshKey.private_key) {
-                        const config = require('../config');
-                        const sshKeyDir = path.join(config.dataDir || '/app/data', 'ssh-keys');
-                        await fs.ensureDir(sshKeyDir);
-
-                        const keyFilename = `info_key_${repo.ssh_key_id}`;
-                        const keyPath = path.join(sshKeyDir, keyFilename);
-                        await fs.writeFile(keyPath, sshKey.private_key, { mode: 0o600 });
-
-                        const sshMatch = repositoryPath.match(/^ssh:\/\/([^@]+)@([^:\/]+)(?::(\d+))?(.*)$/);
-                        const port = sshMatch?.[3] || '22';
-
-                        if (sshKey.is_encrypted && sshKey.passphrase) {
-                            const askpassScript = path.join(sshKeyDir, `askpass_info_${repo.ssh_key_id}.sh`);
-                            const escapedPassphrase = sshKey.passphrase.replace(/'/g, "'\"'\"'");
-                            await fs.writeFile(askpassScript, `#!/bin/sh\necho '${escapedPassphrase}'\n`, { mode: 0o700 });
-                            env.SSH_ASKPASS = askpassScript;
-                            env.SSH_ASKPASS_REQUIRE = 'force';
-                            env.DISPLAY = ':0';
-                            env.BORG_RSH = `ssh -i ${keyPath} -o StrictHostKeyChecking=accept-new -p ${port}`;
-                        } else {
-                            env.BORG_RSH = `ssh -i ${keyPath} -o StrictHostKeyChecking=accept-new -o BatchMode=yes -p ${port}`;
-                        }
-                        console.log(`🔑 [Info] Using SSH key authentication`);
-                    }
-                } catch (sshError) {
-                    console.warn(`⚠️ [Info] Failed to set up SSH key auth:`, sshError.message);
-                }
-            } else if (authMethod === 'password') {
-                try {
-                    const repositoryCredentials = require('../services/repository-credentials');
-                    const sshPassword = await repositoryCredentials.getSSHPassword(repositoryPath);
-                    if (sshPassword) {
-                        const sshMatch = repositoryPath.match(/^ssh:\/\/([^@]+)@([^:\/]+)(?::(\d+))?(.*)$/);
-                        const port = sshMatch?.[3] || '22';
-                        env.SSHPASS = sshPassword;
-                        env.BORG_RSH = `sshpass -e ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -p ${port}`;
-                        console.log(`🔐 [Info] Using SSH password authentication`);
-                    }
-                } catch (pwError) {
-                    console.warn(`⚠️ [Info] Failed to set up SSH password auth:`, pwError.message);
-                }
-            }
-        }
+        await configureBorgSshEnv(env, repositoryPath, 'Info');
 
         // Use borg info --json to get archive details
         // Borg 1.x: borg info <repo>::<archive> --json
@@ -392,60 +340,7 @@ router.get('/:repositoryPath/:archiveName/files', authenticateToken, async (req,
         const borgVersion = repo?.borg_version || '1.x'; // Default to 1.x for existing repos
         const borgPath = getBorgPath(borgVersion);
 
-        // Set up SSH authentication if this is an SSH repository
-        const isSSHRepo = repositoryPath.startsWith('ssh://');
-        if (isSSHRepo && repo) {
-            const authMethod = repo.ssh_auth_method || (repo.ssh_key_id ? 'key' : 'password');
-
-            if (authMethod === 'key' && repo.ssh_key_id) {
-                try {
-                    const sshKeysAPI = require('../services/ssh-keys');
-                    const sshKey = await sshKeysAPI.getSSHKey(repo.ssh_key_id);
-
-                    if (sshKey && sshKey.private_key) {
-                        const config = require('../config');
-                        const sshKeyDir = path.join(config.dataDir || '/app/data', 'ssh-keys');
-                        await fs.ensureDir(sshKeyDir);
-
-                        const keyFilename = `files_key_${repo.ssh_key_id}`;
-                        const keyPath = path.join(sshKeyDir, keyFilename);
-                        await fs.writeFile(keyPath, sshKey.private_key, { mode: 0o600 });
-
-                        const sshMatch = repositoryPath.match(/^ssh:\/\/([^@]+)@([^:\/]+)(?::(\d+))?(.*)$/);
-                        const port = sshMatch?.[3] || '22';
-
-                        if (sshKey.is_encrypted && sshKey.passphrase) {
-                            const askpassScript = path.join(sshKeyDir, `askpass_files_${repo.ssh_key_id}.sh`);
-                            const escapedPassphrase = sshKey.passphrase.replace(/'/g, "'\"'\"'");
-                            await fs.writeFile(askpassScript, `#!/bin/sh\necho '${escapedPassphrase}'\n`, { mode: 0o700 });
-                            env.SSH_ASKPASS = askpassScript;
-                            env.SSH_ASKPASS_REQUIRE = 'force';
-                            env.DISPLAY = ':0';
-                            env.BORG_RSH = `ssh -i ${keyPath} -o StrictHostKeyChecking=accept-new -p ${port}`;
-                        } else {
-                            env.BORG_RSH = `ssh -i ${keyPath} -o StrictHostKeyChecking=accept-new -o BatchMode=yes -p ${port}`;
-                        }
-                        console.log(`🔑 [Files] Using SSH key authentication`);
-                    }
-                } catch (sshError) {
-                    console.warn(`⚠️ [Files] Failed to set up SSH key auth:`, sshError.message);
-                }
-            } else if (authMethod === 'password') {
-                try {
-                    const repositoryCredentials = require('../services/repository-credentials');
-                    const sshPassword = await repositoryCredentials.getSSHPassword(repositoryPath);
-                    if (sshPassword) {
-                        const sshMatch = repositoryPath.match(/^ssh:\/\/([^@]+)@([^:\/]+)(?::(\d+))?(.*)$/);
-                        const port = sshMatch?.[3] || '22';
-                        env.SSHPASS = sshPassword;
-                        env.BORG_RSH = `sshpass -e ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -p ${port}`;
-                        console.log(`🔐 [Files] Using SSH password authentication`);
-                    }
-                } catch (pwError) {
-                    console.warn(`⚠️ [Files] Failed to set up SSH password auth:`, pwError.message);
-                }
-            }
-        }
+        await configureBorgSshEnv(env, repositoryPath, 'Files');
 
         // Borg 1.x: borg list <repo>::<archive> --json-lines
         // Borg 2.x: borg -r <repo> list <archive> --json-lines
@@ -568,61 +463,7 @@ router.get('/browse', authenticateToken, async (req, res) => {
             env.BORG_PASSPHRASE = passphrase;
         }
 
-        // Set up SSH authentication if this is an SSH repository
-        const isSSHRepo = repositoryPath.startsWith('ssh://');
-        if (isSSHRepo && repo) {
-            const authMethod = repo.ssh_auth_method || (repo.ssh_key_id ? 'key' : 'password');
-
-            if (authMethod === 'key' && repo.ssh_key_id) {
-                try {
-                    const sshKeysAPI = require('../services/ssh-keys');
-                    const sshKey = await sshKeysAPI.getSSHKey(repo.ssh_key_id);
-
-                    if (sshKey && sshKey.private_key) {
-                        const config = require('../config');
-                        const sshKeyDir = path.join(config.dataDir || '/app/data', 'ssh-keys');
-                        await fs.ensureDir(sshKeyDir);
-
-                        const keyFilename = `browse_key_${repo.ssh_key_id}`;
-                        const keyPath = path.join(sshKeyDir, keyFilename);
-                        await fs.writeFile(keyPath, sshKey.private_key, { mode: 0o600 });
-
-                        const sshMatch = repositoryPath.match(/^ssh:\/\/([^@]+)@([^:\/]+)(?::(\d+))?(.*)$/);
-                        const port = sshMatch?.[3] || '22';
-
-                        if (sshKey.is_encrypted && sshKey.passphrase) {
-                            // For encrypted keys, use SSH_ASKPASS
-                            const askpassScript = path.join(sshKeyDir, `askpass_browse_${repo.ssh_key_id}.sh`);
-                            const escapedPassphrase = sshKey.passphrase.replace(/'/g, "'\"'\"'");
-                            await fs.writeFile(askpassScript, `#!/bin/sh\necho '${escapedPassphrase}'\n`, { mode: 0o700 });
-                            env.SSH_ASKPASS = askpassScript;
-                            env.SSH_ASKPASS_REQUIRE = 'force';
-                            env.DISPLAY = ':0';
-                            env.BORG_RSH = `ssh -i ${keyPath} -o StrictHostKeyChecking=accept-new -p ${port}`;
-                        } else {
-                            env.BORG_RSH = `ssh -i ${keyPath} -o StrictHostKeyChecking=accept-new -o BatchMode=yes -p ${port}`;
-                        }
-                        console.log(`🔑 [Browse] Using SSH key authentication`);
-                    }
-                } catch (sshError) {
-                    console.warn(`⚠️ [Browse] Failed to set up SSH key auth:`, sshError.message);
-                }
-            } else if (authMethod === 'password') {
-                try {
-                    const repositoryCredentials = require('../services/repository-credentials');
-                    const sshPassword = await repositoryCredentials.getSSHPassword(repositoryPath);
-                    if (sshPassword) {
-                        const sshMatch = repositoryPath.match(/^ssh:\/\/([^@]+)@([^:\/]+)(?::(\d+))?(.*)$/);
-                        const port = sshMatch?.[3] || '22';
-                        env.SSHPASS = sshPassword;
-                        env.BORG_RSH = `sshpass -e ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -p ${port}`;
-                        console.log(`🔐 [Browse] Using SSH password authentication`);
-                    }
-                } catch (pwError) {
-                    console.warn(`⚠️ [Browse] Failed to set up SSH password auth:`, pwError.message);
-                }
-            }
-        }
+        await configureBorgSshEnv(env, repositoryPath, 'Browse');
 
         // Normalize browse path (remove leading/trailing slashes for borg)
         const normalizedPath = browsePath === '/' ? '' : browsePath.replace(/^\/+|\/+$/g, '');
@@ -1114,60 +955,7 @@ router.get('/:repositoryPath/:archiveName/browse', authenticateToken, async (req
         const borgVersion = repo?.borg_version || '1.x'; // Default to 1.x for existing repos
         const borgPathBin = getBorgPath(borgVersion);
 
-        // Set up SSH authentication if this is an SSH repository
-        const isSSHRepo = repositoryPath.startsWith('ssh://');
-        if (isSSHRepo && repo) {
-            const authMethod = repo.ssh_auth_method || (repo.ssh_key_id ? 'key' : 'password');
-
-            if (authMethod === 'key' && repo.ssh_key_id) {
-                try {
-                    const sshKeysAPI = require('../services/ssh-keys');
-                    const sshKey = await sshKeysAPI.getSSHKey(repo.ssh_key_id);
-
-                    if (sshKey && sshKey.private_key) {
-                        const config = require('../config');
-                        const sshKeyDir = path.join(config.dataDir || '/app/data', 'ssh-keys');
-                        await fs.ensureDir(sshKeyDir);
-
-                        const keyFilename = `browse_legacy_key_${repo.ssh_key_id}`;
-                        const keyPath = path.join(sshKeyDir, keyFilename);
-                        await fs.writeFile(keyPath, sshKey.private_key, { mode: 0o600 });
-
-                        const sshMatch = repositoryPath.match(/^ssh:\/\/([^@]+)@([^:\/]+)(?::(\d+))?(.*)$/);
-                        const port = sshMatch?.[3] || '22';
-
-                        if (sshKey.is_encrypted && sshKey.passphrase) {
-                            const askpassScript = path.join(sshKeyDir, `askpass_browse_legacy_${repo.ssh_key_id}.sh`);
-                            const escapedPassphrase = sshKey.passphrase.replace(/'/g, "'\"'\"'");
-                            await fs.writeFile(askpassScript, `#!/bin/sh\necho '${escapedPassphrase}'\n`, { mode: 0o700 });
-                            env.SSH_ASKPASS = askpassScript;
-                            env.SSH_ASKPASS_REQUIRE = 'force';
-                            env.DISPLAY = ':0';
-                            env.BORG_RSH = `ssh -i ${keyPath} -o StrictHostKeyChecking=accept-new -p ${port}`;
-                        } else {
-                            env.BORG_RSH = `ssh -i ${keyPath} -o StrictHostKeyChecking=accept-new -o BatchMode=yes -p ${port}`;
-                        }
-                        console.log(`🔑 [Browse Legacy] Using SSH key authentication`);
-                    }
-                } catch (sshError) {
-                    console.warn(`⚠️ [Browse Legacy] Failed to set up SSH key auth:`, sshError.message);
-                }
-            } else if (authMethod === 'password') {
-                try {
-                    const repositoryCredentials = require('../services/repository-credentials');
-                    const sshPassword = await repositoryCredentials.getSSHPassword(repositoryPath);
-                    if (sshPassword) {
-                        const sshMatch = repositoryPath.match(/^ssh:\/\/([^@]+)@([^:\/]+)(?::(\d+))?(.*)$/);
-                        const port = sshMatch?.[3] || '22';
-                        env.SSHPASS = sshPassword;
-                        env.BORG_RSH = `sshpass -e ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -p ${port}`;
-                        console.log(`🔐 [Browse Legacy] Using SSH password authentication`);
-                    }
-                } catch (pwError) {
-                    console.warn(`⚠️ [Browse Legacy] Failed to set up SSH password auth:`, pwError.message);
-                }
-            }
-        }
+        await configureBorgSshEnv(env, repositoryPath, 'Browse Legacy');
 
         // Build borg command based on version
         // Borg 1.x: borg list <repo>::<archive> --json-lines [--depth N] [path]
@@ -1317,60 +1105,7 @@ router.get('/:repositoryPath/:archiveName/preview', authenticateToken, async (re
         const borgVersion = repo?.borg_version || '1.x'; // Default to 1.x for existing repos
         const borgPathBin = getBorgPath(borgVersion);
 
-        // Set up SSH authentication if this is an SSH repository
-        const isSSHRepo = repositoryPath.startsWith('ssh://');
-        if (isSSHRepo && repo) {
-            const authMethod = repo.ssh_auth_method || (repo.ssh_key_id ? 'key' : 'password');
-
-            if (authMethod === 'key' && repo.ssh_key_id) {
-                try {
-                    const sshKeysAPI = require('../services/ssh-keys');
-                    const sshKey = await sshKeysAPI.getSSHKey(repo.ssh_key_id);
-
-                    if (sshKey && sshKey.private_key) {
-                        const config = require('../config');
-                        const sshKeyDir = path.join(config.dataDir || '/app/data', 'ssh-keys');
-                        await fs.ensureDir(sshKeyDir);
-
-                        const keyFilename = `preview_key_${repo.ssh_key_id}`;
-                        const keyPath = path.join(sshKeyDir, keyFilename);
-                        await fs.writeFile(keyPath, sshKey.private_key, { mode: 0o600 });
-
-                        const sshMatch = repositoryPath.match(/^ssh:\/\/([^@]+)@([^:\/]+)(?::(\d+))?(.*)$/);
-                        const port = sshMatch?.[3] || '22';
-
-                        if (sshKey.is_encrypted && sshKey.passphrase) {
-                            const askpassScript = path.join(sshKeyDir, `askpass_preview_${repo.ssh_key_id}.sh`);
-                            const escapedPassphrase = sshKey.passphrase.replace(/'/g, "'\"'\"'");
-                            await fs.writeFile(askpassScript, `#!/bin/sh\necho '${escapedPassphrase}'\n`, { mode: 0o700 });
-                            env.SSH_ASKPASS = askpassScript;
-                            env.SSH_ASKPASS_REQUIRE = 'force';
-                            env.DISPLAY = ':0';
-                            env.BORG_RSH = `ssh -i ${keyPath} -o StrictHostKeyChecking=accept-new -p ${port}`;
-                        } else {
-                            env.BORG_RSH = `ssh -i ${keyPath} -o StrictHostKeyChecking=accept-new -o BatchMode=yes -p ${port}`;
-                        }
-                        console.log(`🔑 [Preview] Using SSH key authentication`);
-                    }
-                } catch (sshError) {
-                    console.warn(`⚠️ [Preview] Failed to set up SSH key auth:`, sshError.message);
-                }
-            } else if (authMethod === 'password') {
-                try {
-                    const repositoryCredentials = require('../services/repository-credentials');
-                    const sshPassword = await repositoryCredentials.getSSHPassword(repositoryPath);
-                    if (sshPassword) {
-                        const sshMatch = repositoryPath.match(/^ssh:\/\/([^@]+)@([^:\/]+)(?::(\d+))?(.*)$/);
-                        const port = sshMatch?.[3] || '22';
-                        env.SSHPASS = sshPassword;
-                        env.BORG_RSH = `sshpass -e ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -p ${port}`;
-                        console.log(`🔐 [Preview] Using SSH password authentication`);
-                    }
-                } catch (pwError) {
-                    console.warn(`⚠️ [Preview] Failed to set up SSH password auth:`, pwError.message);
-                }
-            }
-        }
+        await configureBorgSshEnv(env, repositoryPath, 'Preview');
 
         // Create temp directory
         const tmpDir = path.join('/tmp', `borgmatic-preview-${Date.now()}`);
@@ -1499,60 +1234,7 @@ router.delete('/:repositoryPath/:archiveName', authenticateToken, requireAdmin, 
         const borgVersion = repo?.borg_version || '1.x'; // Default to 1.x for existing repos
         const borgPathBin = getBorgPath(borgVersion);
 
-        // Set up SSH authentication if this is an SSH repository
-        const isSSHRepo = repositoryPath.startsWith('ssh://');
-        if (isSSHRepo && repo) {
-            const authMethod = repo.ssh_auth_method || (repo.ssh_key_id ? 'key' : 'password');
-
-            if (authMethod === 'key' && repo.ssh_key_id) {
-                try {
-                    const sshKeysAPI = require('../services/ssh-keys');
-                    const sshKey = await sshKeysAPI.getSSHKey(repo.ssh_key_id);
-
-                    if (sshKey && sshKey.private_key) {
-                        const config = require('../config');
-                        const sshKeyDir = path.join(config.dataDir || '/app/data', 'ssh-keys');
-                        await fs.ensureDir(sshKeyDir);
-
-                        const keyFilename = `delete_key_${repo.ssh_key_id}`;
-                        const keyPath = path.join(sshKeyDir, keyFilename);
-                        await fs.writeFile(keyPath, sshKey.private_key, { mode: 0o600 });
-
-                        const sshMatch = repositoryPath.match(/^ssh:\/\/([^@]+)@([^:\/]+)(?::(\d+))?(.*)$/);
-                        const port = sshMatch?.[3] || '22';
-
-                        if (sshKey.is_encrypted && sshKey.passphrase) {
-                            const askpassScript = path.join(sshKeyDir, `askpass_delete_${repo.ssh_key_id}.sh`);
-                            const escapedPassphrase = sshKey.passphrase.replace(/'/g, "'\"'\"'");
-                            await fs.writeFile(askpassScript, `#!/bin/sh\necho '${escapedPassphrase}'\n`, { mode: 0o700 });
-                            env.SSH_ASKPASS = askpassScript;
-                            env.SSH_ASKPASS_REQUIRE = 'force';
-                            env.DISPLAY = ':0';
-                            env.BORG_RSH = `ssh -i ${keyPath} -o StrictHostKeyChecking=accept-new -p ${port}`;
-                        } else {
-                            env.BORG_RSH = `ssh -i ${keyPath} -o StrictHostKeyChecking=accept-new -o BatchMode=yes -p ${port}`;
-                        }
-                        console.log(`🔑 [Delete] Using SSH key authentication`);
-                    }
-                } catch (sshError) {
-                    console.warn(`⚠️ [Delete] Failed to set up SSH key auth:`, sshError.message);
-                }
-            } else if (authMethod === 'password') {
-                try {
-                    const repositoryCredentials = require('../services/repository-credentials');
-                    const sshPassword = await repositoryCredentials.getSSHPassword(repositoryPath);
-                    if (sshPassword) {
-                        const sshMatch = repositoryPath.match(/^ssh:\/\/([^@]+)@([^:\/]+)(?::(\d+))?(.*)$/);
-                        const port = sshMatch?.[3] || '22';
-                        env.SSHPASS = sshPassword;
-                        env.BORG_RSH = `sshpass -e ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -p ${port}`;
-                        console.log(`🔐 [Delete] Using SSH password authentication`);
-                    }
-                } catch (pwError) {
-                    console.warn(`⚠️ [Delete] Failed to set up SSH password auth:`, pwError.message);
-                }
-            }
-        }
+        await configureBorgSshEnv(env, repositoryPath, 'Delete');
 
         // Use borg delete to remove the archive
         // Borg 1.x: borg delete <repo>::<archive>
