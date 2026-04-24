@@ -1,12 +1,66 @@
 const express = require('express');
 const router = express.Router();
 const fs = require('fs-extra');
+const fsRaw = require('fs');
 const path = require('path');
 const { authenticateToken, requireAdmin } = require('../middleware/auth');
 
 function isUnsafePathInput(p) {
     // Reject null bytes and obviously bad inputs
     return typeof p !== 'string' || p.length === 0 || p.includes('\0');
+}
+
+/**
+ * Collect a one-shot snapshot of the current process's identity, capabilities,
+ * seccomp/AppArmor profile, and how it sees a given path. Used when the
+ * browse/create handlers fail with EACCES so we can tell at a glance whether
+ * the failure is a genuine POSIX permission issue or a container-level
+ * restriction (capability drop, seccomp, AppArmor, user-namespace remap, …).
+ *
+ * Intentionally verbose: if it reproduces once in production we want
+ * every detail next to the error line in `docker logs`, without requiring
+ * the user to re-run ad-hoc commands.
+ */
+function describeProcessEnvironment(targetPath) {
+    const out = {};
+    try {
+        out.uid = process.getuid?.();
+        out.euid = process.geteuid?.();
+        out.gid = process.getgid?.();
+        out.egid = process.getegid?.();
+        out.groups = process.getgroups?.();
+    } catch (_e) { /* Windows */ }
+
+    try {
+        out.self_status = fsRaw.readFileSync('/proc/self/status', 'utf8')
+            .split('\n')
+            .filter(l => /^(Name|Uid|Gid|CapInh|CapPrm|CapEff|CapBnd|CapAmb|NoNewPrivs|Seccomp)\b/.test(l))
+            .join(' | ');
+    } catch (_e) { /* non-Linux */ }
+
+    try {
+        out.self_attr = fsRaw.readFileSync('/proc/self/attr/current', 'utf8').trim();
+    } catch (_e) { /* not set or unreadable */ }
+
+    if (targetPath) {
+        try {
+            const s = fsRaw.lstatSync(targetPath);
+            out.target_mode = (s.mode & 0o7777).toString(8);
+            out.target_uid = s.uid;
+            out.target_gid = s.gid;
+            out.target_type = s.isDirectory() ? 'dir' : s.isSymbolicLink() ? 'symlink' : 'file';
+        } catch (e) {
+            out.target_stat_error = `${e.code || e.name}: ${e.message}`;
+        }
+        try {
+            fsRaw.accessSync(targetPath, fsRaw.constants.R_OK | fsRaw.constants.X_OK);
+            out.access_rx = 'ok';
+        } catch (e) {
+            out.access_rx = `${e.code || e.name}: ${e.message}`;
+        }
+    }
+
+    return out;
 }
 
 /**
@@ -132,14 +186,20 @@ router.get('/browse', authenticateToken, requireAdmin, async (req, res) => {
 
     } catch (error) {
         console.error('Failed to browse filesystem:', error);
-        
+
         if (error.code === 'EACCES') {
+            // EACCES on a path the host's root CAN read indicates a container
+            // restriction (seccomp / AppArmor / dropped capability / userns
+            // remap) rather than a real POSIX permission problem. Dump the
+            // running process's identity & capabilities next to the error so
+            // ops can tell immediately which mechanism is blocking.
+            console.error('[filesystem] EACCES diagnostics:', describeProcessEnvironment(error.path || req.query.path));
             return res.status(403).json({
                 success: false,
                 error: 'Permission denied: cannot access this directory'
             });
         }
-        
+
         if (error.code === 'ENOENT') {
             return res.status(404).json({
                 success: false,
@@ -287,8 +347,14 @@ router.post('/create-directory', authenticateToken, requireAdmin, async (req, re
 
     } catch (error) {
         console.error('Failed to create directory:', error);
-        
+
         if (error.code === 'EACCES') {
+            // Same story as /browse: if the host root can mkdir here, an
+            // EACCES from inside the container points at a container-level
+            // restriction we need to diagnose. Log the parent directory so
+            // we can see what the process *does* have access to.
+            const parentForDiag = error.path ? path.dirname(error.path) : undefined;
+            console.error('[filesystem] EACCES diagnostics:', describeProcessEnvironment(parentForDiag));
             return res.status(403).json({
                 success: false,
                 error: 'Permission denied: cannot create directory here'
