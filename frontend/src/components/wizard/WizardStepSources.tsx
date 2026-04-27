@@ -430,7 +430,7 @@ const WizardStepSources: React.FC<WizardStepSourcesProps> = (props) => {
                 <p className="font-semibold text-purple-800 mb-1">Scope</p>
                 <ul className="space-y-0.5 mb-2">
                   <li><strong>Organization / User</strong> — Backs up all repos (or selected repos) from an org, group, workspace, or personal user account. For GitHub, you can enter either an <strong>organization name</strong> (e.g. <code className="bg-purple-100 px-1 rounded">SpeedbitsInfinityTools</code>) or your <strong>username</strong> (e.g. <code className="bg-purple-100 px-1 rounded">smartinventure</code>) — the system auto-detects which one it is. Use "Discover Repos" to see what's available.</li>
-                  <li><strong>Single Repository</strong> — Backs up one specific repo by name.</li>
+                  <li><strong>Single Repository</strong> — Backs up one specific repo by name. Useful when you only have access to one repo (e.g. a <strong>collaborator invitation</strong> on someone else's private repo). For GitHub, you can also paste the full <code className="bg-purple-100 px-1 rounded">owner/repo</code> slug into the Organization field of "Organization / User" mode and it will be detected automatically.</li>
                 </ul>
 
                 <p className="font-semibold text-purple-800 mb-1">Mirror vs. Clone</p>
@@ -1009,9 +1009,11 @@ const GitSourceCard: React.FC<GitSourceCardProps> = ({
                     ? 'Organization'
                     : 'Organization or Username'}
               </label>
-              <input type="text" value={source.organization || ''} onChange={(e) => updateSource(index, 'organization', e.target.value)} onBlur={() => trimSourceField(index, 'organization')} placeholder={source.platform === 'azure' ? 'my-azure-org' : source.scope === 'single_repo' ? 'owner' : 'my-org or my-username'} className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-purple-500 focus:border-purple-500" />
+              <input type="text" value={source.organization || ''} onChange={(e) => updateSource(index, 'organization', e.target.value)} onBlur={() => trimSourceField(index, 'organization')} placeholder={source.platform === 'azure' ? 'my-azure-org' : source.scope === 'single_repo' ? 'owner' : 'my-org, my-username, or owner/repo'} className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-purple-500 focus:border-purple-500" />
               {source.platform === 'github' && source.scope === 'organization' && (
-                <p className="text-[10px] text-gray-400 mt-0.5">Works with both GitHub organizations and personal user accounts</p>
+                <p className="text-[10px] text-gray-400 mt-0.5">
+                  Works with GitHub organizations and personal user accounts. To back up a <strong>single private repo where you're a collaborator</strong>, paste the full <code className="px-1 rounded bg-gray-100">owner/repo</code> slug (e.g. <code className="px-1 rounded bg-gray-100">my-org/my-repo</code> or <code className="px-1 rounded bg-gray-100">someuser/their-repo</code>).
+                </p>
               )}
             </div>
           )}

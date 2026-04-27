@@ -347,6 +347,14 @@ async function startServer() {
         console.warn('⚠️ Template manager initialization warning:', error.message);
     }
 
+    // Reconcile backups stuck in "running" after a restart/crash
+    try {
+        const backupManager = require('./services/backup-manager');
+        await backupManager.reconcileStaleRunningBackups();
+    } catch (error) {
+        console.warn('⚠️ Backup metadata reconciliation warning:', error.message);
+    }
+
     // Initialize schedule manager (restores cron jobs for active backups)
     try {
         const scheduleManager = require('./services/schedule-manager');

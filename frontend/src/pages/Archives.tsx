@@ -30,7 +30,7 @@ import {
   GitBranch,
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
-import { formatDateTime } from '../utils/dateFormat';
+import { formatDateTime, formatDateTimeTooltip } from '../utils/dateFormat';
 import { getSafeDisplayPath } from '../utils/repositoryUtils';
 import { ArchiveBrowserModal } from '../components/archives';
 import RestoreOptionsModal from '../components/archives/RestoreOptionsModal';
@@ -858,7 +858,14 @@ const RepositoryCard = ({
                             </span>
                           </div>
 
-                          <div className="text-xs text-gray-500 ml-4">
+                          <div
+                            className="text-xs text-gray-500 ml-4"
+                            title={formatDateTimeTooltip(
+                              jobArchives.reduce((latest, current) => {
+                                return new Date(current.created) > new Date(latest.created) ? current : latest;
+                              }, jobArchives[0]).created
+                            )}
+                          >
                             Latest: {formatDateTime(
                               jobArchives.reduce((latest, current) => {
                                 return new Date(current.created) > new Date(latest.created) ? current : latest;
@@ -1044,7 +1051,7 @@ const ArchiveRow = ({
             </div>
 
             <div className="flex items-center space-x-4 mt-1 text-xs text-gray-600">
-              <span className="flex items-center">
+              <span className="flex items-center" title={formatDateTimeTooltip(archive.created)}>
                 <Clock className="w-3 h-3 mr-1" />
                 {formatDateTime(archive.created)}
               </span>

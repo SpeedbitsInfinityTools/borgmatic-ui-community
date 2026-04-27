@@ -466,6 +466,14 @@ class BackupExecutor {
                     runningInfo.process = childProcess;
                 }
 
+                // Persist PID so we can reconcile "running" after restarts/crashes.
+                // The enclosing Promise executor is sync, so fire-and-forget instead of awaiting.
+                backupManager.updateBackupMetadata(backupId, {
+                    last_run_pid: childProcess.pid
+                }).catch((metaErr) => {
+                    console.warn('Could not store backup PID in metadata:', metaErr.message);
+                });
+
                 let stdoutData = '';
                 let stderrData = '';
 
@@ -542,7 +550,8 @@ class BackupExecutor {
                             try {
                                 await backupManager.updateBackupMetadata(backupId, {
                                     last_run: new Date().toISOString(),
-                                    last_run_status: status
+                                    last_run_status: status,
+                                    last_run_pid: null
                                 });
                             } catch (metaError) {
                                 console.error('Failed to update backup metadata:', metaError.message);
@@ -595,7 +604,8 @@ class BackupExecutor {
                             // Update metadata with error
                             await backupManager.updateBackupMetadata(backupId, {
                                 last_run: new Date().toISOString(),
-                                last_run_status: 'failed'
+                                last_run_status: 'failed',
+                                last_run_pid: null
                             });
 
                             // Broadcast failure event via SSE
@@ -644,7 +654,8 @@ class BackupExecutor {
 
                     await backupManager.updateBackupMetadata(backupId, {
                         last_run: new Date().toISOString(),
-                        last_run_status: 'failed'
+                        last_run_status: 'failed',
+                        last_run_pid: null
                     });
 
                     eventManager.broadcastEvent('backup_failed', {
@@ -751,7 +762,8 @@ class BackupExecutor {
         try {
             await backupManager.updateBackupMetadata(backupId, {
                 last_run: new Date().toISOString(),
-                last_run_status: 'failed'
+                last_run_status: 'failed',
+                last_run_pid: null
             });
         } catch (metaErr) {
             console.warn(`⚠️ Could not update metadata for stopped backup: ${metaErr.message}`);

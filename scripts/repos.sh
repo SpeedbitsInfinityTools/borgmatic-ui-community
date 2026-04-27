@@ -1308,10 +1308,13 @@ github_get_repos_tsv() {
     echo "Using authenticated endpoint (GET /user/repos) for private repo access" >&2
   fi
   
+  # Accumulate output into a buffer so we can dedup across the public listing
+  # and the optional collaborator-affiliation augmentation.
+  local out=""
   local page=1
   local per_page=100
   local first_call=true
-  
+
   while true; do
     local url=""
     if [[ "$use_authenticated_endpoint" == "true" ]]; then
@@ -1333,12 +1336,94 @@ github_get_repos_tsv() {
     local count=$(jq 'length' "$API_RESPONSE_FILE")
     [[ "$count" == "0" ]] && { rm -f "$API_RESPONSE_FILE"; break; }
     
-    jq -r '.[] | select(.fork == false or env.INCLUDE_FORKS == "true") | [.name, .clone_url, .default_branch] | @tsv' "$API_RESPONSE_FILE"
+    out+="$(jq -r '.[] | select(.fork == false or env.INCLUDE_FORKS == "true") | [.name, .clone_url, .default_branch] | @tsv' "$API_RESPONSE_FILE")"$'\n'
     
     rm -f "$API_RESPONSE_FILE"
     [[ "$count" -lt "$per_page" ]] && break
     ((page++))
   done
+
+  # ---------------------------------------------------------------------------
+  # Augmentation: include repos owned by $owner that the PAT can see only via
+  # collaborator/organization-member affiliation.
+  #
+  # The /users/{owner}/repos endpoint never returns repos that the PAT was
+  # *invited to* (collaborator) — only repos owned by {owner} that are
+  # visible to the PAT through general access. So when {owner} != the
+  # authenticated user, we additionally pull from
+  #   GET /user/repos?affiliation=collaborator,organization_member
+  # and keep only rows whose owner.login matches {owner}. This makes the
+  # common single-collaborator-private-repo case work without forcing the
+  # user to switch the wizard to "Single Repository" mode.
+  # ---------------------------------------------------------------------------
+  if [[ "$owner_type" == "users" && -n "$GH_AUTHENTICATED_USER" && "$owner" != "$GH_AUTHENTICATED_USER" ]]; then
+    local collab_visibility="$visibility"
+    page=1
+    while true; do
+      local url="https://api.github.com/user/repos?per_page=${per_page}&page=${page}&visibility=${collab_visibility}&affiliation=collaborator,organization_member"
+      if ! api_request "$url" "token"; then
+        # Not a hard failure — augmentation is best-effort.
+        rm -f "$API_RESPONSE_FILE" 2>/dev/null
+        break
+      fi
+      local count
+      count=$(jq 'length' "$API_RESPONSE_FILE")
+      [[ "$count" == "0" ]] && { rm -f "$API_RESPONSE_FILE"; break; }
+      out+="$(jq -r --arg owner "$owner" '.[] | select(.owner.login == $owner) | select(.fork == false or env.INCLUDE_FORKS == "true") | [.name, .clone_url, .default_branch] | @tsv' "$API_RESPONSE_FILE")"$'\n'
+      rm -f "$API_RESPONSE_FILE"
+      [[ "$count" -lt "$per_page" ]] && break
+      ((page++))
+    done
+  fi
+
+  # Dedup by repo name (column 1), preserving the first occurrence — keeps
+  # the public-listing rows ahead of the collaborator-augmentation rows.
+  printf '%s' "$out" | awk -F'\t' 'NF>=2 && !seen[$1]++'
+}
+
+# ----------------------------------------------------------------------------
+# Direct repo lookup helper.
+#
+# Used as a fallback when the public/owner listing turns up nothing but the
+# user has explicitly asked for one or more repos via `selectedRepos`. This
+# is the typical PAT-as-collaborator situation: the PAT can access exactly
+# one private repo of someone else's account, and that repo is invisible to
+# /users/{owner}/repos. /repos/{owner}/{name} works fine in that case.
+# ----------------------------------------------------------------------------
+github_lookup_selected_repos() {
+  local owner="$1"
+  local count=0
+  while IFS= read -r slug; do
+    [[ -z "$slug" ]] && continue
+    local repo_owner repo_name
+    if [[ "$slug" == *"/"* ]]; then
+      repo_owner="${slug%%/*}"
+      repo_name="${slug#*/}"
+      # Only look up slugs whose owner segment matches the configured owner.
+      # A foreign-owner slug here would mean misconfigured input — emit a
+      # warning rather than silently fetching a different account's repo.
+      if [[ "$repo_owner" != "$owner" ]]; then
+        echo "WARNING: Selected repo '${slug}' has a different owner than '${owner}' — skipping" >&2
+        continue
+      fi
+    else
+      repo_owner="$owner"
+      repo_name="$slug"
+    fi
+    if api_request "https://api.github.com/repos/${repo_owner}/${repo_name}" "token"; then
+      jq -r '
+        select(.fork == false or env.INCLUDE_FORKS == "true") |
+        [.name, .clone_url, .default_branch] | @tsv
+      ' "$API_RESPONSE_FILE"
+      rm -f "$API_RESPONSE_FILE"
+      ((count++)) || true
+    else
+      local code="$API_HTTP_CODE"
+      rm -f "$API_RESPONSE_FILE" 2>/dev/null
+      echo "WARNING: Could not access ${repo_owner}/${repo_name} (HTTP ${code}) — collaborator invite still pending or PAT lacks access" >&2
+    fi
+  done <<< "$SELECTED_REPOS"
+  return 0
 }
 
 GH_AUTHENTICATED_USER=""
@@ -1448,8 +1533,19 @@ run_github() {
   
   local repos_tsv
   repos_tsv=$(github_get_repos_tsv "$owner" "$owner_type") || exit 1
+
+  # Listing came back empty. Before giving up, see if the user pointed us at
+  # specific repos (selectedRepos / "Single Repository" mode / pasted
+  # owner/repo slug). When you're a collaborator on someone else's private
+  # repo, /users/{owner}/repos won't list it — but /repos/{owner}/{name} can
+  # still fetch it. Try that as a fallback so the common single-collaborator
+  # case works.
+  if [[ -z "$repos_tsv" && -n "$SELECTED_REPOS" ]]; then
+    echo "Listing for '$owner' returned no repos — trying direct lookup of selected repos…" >&2
+    repos_tsv=$(github_lookup_selected_repos "$owner")
+  fi
   [[ -z "$repos_tsv" ]] && { echo "ERROR: No repositories found"; exit 1; }
-  
+
   # Warn if private repos were requested but none found (org only —
   # for users, the authenticated endpoint already returns private repos)
   if [[ "$GITHUB_INCLUDE_PRIVATE" == "true" && "$owner_type" == "orgs" ]]; then

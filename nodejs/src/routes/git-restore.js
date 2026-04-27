@@ -70,6 +70,29 @@ function normalizePlatformIdentifier(value) {
     return v;
 }
 
+/**
+ * Detect a pasted `owner/repo` slug in an Organization / User field. Mirrors
+ * the helper in git-repos.js so the wizard's "test" and "discover" steps
+ * behave consistently for the same input.
+ *
+ * Returns `{ owner, repo }` (with `repo: null` if the value isn't slug-shaped).
+ * The git-restore test endpoint only uses the `owner` half — restore creates
+ * repos at the destination, so a paired slug is informational rather than
+ * required, but we still need to split off the repo segment so the URL
+ * `/users/<owner>%2F<repo>` doesn't 404 when validating the destination.
+ */
+function splitOwnerRepoSlug(value) {
+    if (!value || typeof value !== 'string') return { owner: value, repo: null };
+    if (!value.includes('/')) return { owner: value, repo: null };
+    const idx = value.indexOf('/');
+    const owner = value.slice(0, idx).trim();
+    const repo = value.slice(idx + 1).trim();
+    if (!owner || !repo || repo.includes('/')) {
+        return { owner: value, repo: null };
+    }
+    return { owner, repo };
+}
+
 function sanitizeSensitive(text, secrets = []) {
     let out = String(text || '');
     for (const secret of secrets.filter(Boolean)) {
@@ -260,9 +283,26 @@ router.post('/test', authenticateToken, requireAdmin, async (req, res) => {
         return res.status(400).json({ error: 'platform and pat are required' });
     }
 
-    const organization = normalizePlatformIdentifier(rawOrganization);
-    const user = normalizePlatformIdentifier(rawUser);
+    let organization = normalizePlatformIdentifier(rawOrganization);
+    let user = normalizePlatformIdentifier(rawUser);
     const workspace = normalizePlatformIdentifier(rawWorkspace);
+
+    // GitHub: tolerate `owner/repo` pasted into the destination Organization
+    // / User field. Use the owner segment for org/user validation; the repo
+    // segment is a hint about the desired destination repo name.
+    let pastedDestRepo = null;
+    if (platform === 'github') {
+        const orgSlug = splitOwnerRepoSlug(organization);
+        const userSlug = splitOwnerRepoSlug(user);
+        if (orgSlug.repo) {
+            organization = orgSlug.owner;
+            pastedDestRepo = orgSlug.repo;
+        }
+        if (userSlug.repo) {
+            user = userSlug.owner;
+            pastedDestRepo = pastedDestRepo || userSlug.repo;
+        }
+    }
 
     const redact = (text) => sanitizeSensitive(String(text || '').substring(0, 500), [pat]);
 
@@ -304,9 +344,12 @@ router.post('/test', authenticateToken, requireAdmin, async (req, res) => {
                     { headers: authHeaders }
                 );
                 if (orgResp.ok) {
+                    const note = pastedDestRepo
+                        ? ` Detected '${pastedDestRepo}' as the destination repository name from the pasted slug.`
+                        : '';
                     return res.json({
                         success: true,
-                        message: `Connection successful. Organization '${owner}' is accessible.`,
+                        message: `Connection successful. Organization '${owner}' is accessible.${note}`,
                     });
                 }
                 if (orgResp.status === 404) {
@@ -317,9 +360,12 @@ router.post('/test', authenticateToken, requireAdmin, async (req, res) => {
                     if (userCheck.ok) {
                         const acct = await userCheck.json().catch(() => ({}));
                         const acctType = acct.type || 'User';
+                        const note = pastedDestRepo
+                            ? ` Detected '${pastedDestRepo}' as the destination repository name from the pasted slug.`
+                            : '';
                         return res.json({
                             success: true,
-                            message: `Connection successful. '${owner}' is a GitHub ${acctType} account (not an organization).`,
+                            message: `Connection successful. '${owner}' is a GitHub ${acctType} account (not an organization).${note}`,
                         });
                     }
                     const detail = await userCheck.text().catch(() => '');
@@ -447,9 +493,9 @@ router.post('/execute', authenticateToken, requireAdmin, async (req, res) => {
         basePath,
         repos,
         platform,
-        organization,
+        organization: rawDestOrganization,
         group: targetGroup,
-        user: targetUser,
+        user: rawDestUser,
         workspace,
         host,
         project,
@@ -466,6 +512,18 @@ router.post('/execute', authenticateToken, requireAdmin, async (req, res) => {
     }
     if (!validateArchiveName(String(archive)) || !validateArchivePath(String(basePath || ''))) {
         return res.status(400).json({ error: 'Invalid archive/base path values' });
+    }
+
+    // Strip an `owner/repo` slug if one slipped through here (e.g. caller
+    // bypassed the /test endpoint). createGitHubRepo only wants the owner;
+    // a slugged value would 404 on /orgs/<owner>%2F<repo>.
+    let organization = rawDestOrganization;
+    let targetUser = rawDestUser;
+    if (platform === 'github') {
+        const o = splitOwnerRepoSlug(organization);
+        const u = splitOwnerRepoSlug(targetUser);
+        if (o.repo) organization = o.owner;
+        if (u.repo) targetUser = u.owner;
     }
 
     const jobId = uuidv4();

@@ -82,14 +82,34 @@ function setCachedListing(cacheKey, data, isRoot = false) {
 }
 
 /**
- * Borg returns timestamps in the system's local timezone without a suffix.
- * JavaScript's Date() treats suffix-less ISO strings as local time, which
- * is the correct interpretation. We only normalize by trimming microseconds
- * to avoid cross-browser parsing quirks.
+ * Borg emits archive start/time strings in the *server's* local timezone
+ * with no offset suffix (e.g. `2026-04-27T08:20:16.123456`). When the API
+ * passes that raw string to the browser, the browser's `new Date(ts)`
+ * interprets it as the *browser's* local timezone — which silently breaks
+ * the display whenever the server runs in a different zone (the most
+ * common case being a Docker container running TZ=UTC while the user's
+ * browser is in CEST).
+ *
+ * We fix this here by anchoring the timestamp to the server's TZ, then
+ * re-serialising as canonical ISO 8601 UTC with a `Z` suffix. Because
+ * Node and the borg process share the same OS-level TZ, parsing the raw
+ * string via `new Date()` on the server interprets it correctly, and
+ * `toISOString()` emits an unambiguous wall clock that the browser can
+ * convert to its own zone.
+ *
+ * Strings that already carry an explicit offset (`Z`, `+02:00`, etc.)
+ * are passed through unchanged.
  */
 function normalizeTimestamp(ts) {
     if (!ts || typeof ts !== 'string') return ts;
-    return ts;
+    // Already explicitly anchored — trust it.
+    if (/Z$/.test(ts) || /[+-]\d{2}:?\d{2}$/.test(ts)) return ts;
+    // Borg can emit 6-digit microseconds; some Date parsers are unhappy
+    // with >3 sub-second digits, so clamp to milliseconds.
+    const clamped = ts.replace(/\.(\d{3})\d+$/, '.$1');
+    const d = new Date(clamped);
+    if (isNaN(d.getTime())) return ts;
+    return d.toISOString();
 }
 
 /**

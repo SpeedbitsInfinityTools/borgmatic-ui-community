@@ -1255,6 +1255,40 @@ class BackupManager {
             config.source_directories.push(targetDirClone);
         }
 
+        // GitHub: tolerate `owner/repo` in the Organization or User field.
+        // The wizard's connection-test endpoint already does the same split
+        // so the user can paste a slug like `my-org/my-repo` and have it
+        // just work; we need to repeat the split here because the saved
+        // YAML is what `repos.sh` actually consumes at backup time. Without
+        // this, the test would succeed but the real run would fail with the
+        // same "not found as organization or user" error.
+        const splitOwnerRepoSlug = (value) => {
+            if (!value || typeof value !== 'string' || !value.includes('/')) {
+                return { owner: value, repo: null };
+            }
+            const idx = value.indexOf('/');
+            const owner = value.slice(0, idx).trim();
+            const repo = value.slice(idx + 1).trim();
+            if (!owner || !repo || repo.includes('/')) return { owner: value, repo: null };
+            return { owner, repo };
+        };
+
+        let ghOwnerNormalized = source.organization;
+        let ghUserNormalized = source.user;
+        const ghImplicitSlugs = [];
+        if (source.platform === 'github') {
+            const orgSlug = splitOwnerRepoSlug(source.organization);
+            const userSlug = splitOwnerRepoSlug(source.user);
+            if (orgSlug.repo) {
+                ghOwnerNormalized = orgSlug.owner;
+                ghImplicitSlugs.push(`${orgSlug.owner}/${orgSlug.repo}`);
+            }
+            if (userSlug.repo) {
+                ghUserNormalized = userSlug.owner;
+                ghImplicitSlugs.push(`${userSlug.owner}/${userSlug.repo}`);
+            }
+        }
+
         // Build the job YAML content
         const buildJobYaml = (backupType, tDir) => {
             const jobObj = {
@@ -1269,20 +1303,25 @@ class BackupManager {
                 },
             };
 
-            // Repo selection filter
+            // Repo selection filter — explicit single_repo or per-repo selection
+            // takes precedence over an implicit GitHub slug, but if neither is
+            // set we fall back to the slug-detected one so collaborator-only
+            // private repos can be backed up.
             if (source.scope === 'single_repo' && source.repo_name) {
-                const owner = source.organization || source.group || source.workspace || source.user;
+                const owner = ghOwnerNormalized || source.group || source.workspace || ghUserNormalized;
                 jobObj.selectedRepos = [owner ? `${owner}/${source.repo_name}` : source.repo_name];
             } else if (source.repo_selection === 'selected' && Array.isArray(source.selected_repos) && source.selected_repos.length > 0) {
                 jobObj.selectedRepos = source.selected_repos;
+            } else if (ghImplicitSlugs.length > 0) {
+                jobObj.selectedRepos = ghImplicitSlugs;
             }
 
             // Platform-specific settings
             switch (source.platform) {
                 case 'github':
                     jobObj.github = {};
-                    if (source.organization) jobObj.github.organization = source.organization;
-                    if (source.user) jobObj.github.user = source.user;
+                    if (ghOwnerNormalized) jobObj.github.organization = ghOwnerNormalized;
+                    if (ghUserNormalized) jobObj.github.user = ghUserNormalized;
                     if (source.include_private !== undefined) jobObj.github.includePrivate = source.include_private;
                     if (source.include_forks !== undefined) jobObj.github.includeForks = source.include_forks;
                     break;
@@ -1556,6 +1595,61 @@ ${metadata.schedule_id ? `# Schedule ID: ${metadata.schedule_id}\n` : ''}
             this.metadataPath,
             yaml.dump(metadata, { indent: 2 })
         );
+    }
+
+    /**
+     * Reconcile backups that were marked "running" but the server crashed/restarted.
+     *
+     * We store the borgmatic PID for each run. On startup, if a backup is still
+     * marked as running but that PID is no longer alive, we flip it to failed so
+     * the UI doesn't show "Running" forever.
+     *
+     * If the PID is still alive, we keep "running" (even though the UI may not be
+     * able to stream progress after a restart). This is still more truthful than
+     * silently flipping it to failed.
+     */
+    async reconcileStaleRunningBackups() {
+        try {
+            await fs.ensureDir(this.backupsDir);
+            await fs.ensureFile(this.metadataPath);
+
+            const metadata = await this.loadMetadata();
+            if (!Array.isArray(metadata.backups) || metadata.backups.length === 0) return;
+
+            let changed = false;
+
+            for (const meta of metadata.backups) {
+                if (meta?.last_run_status !== 'running') continue;
+
+                const pid = Number(meta?.last_run_pid);
+                let alive = false;
+
+                if (Number.isFinite(pid) && pid > 0) {
+                    try {
+                        // Signal 0 does not send a signal; it only checks existence/permission.
+                        process.kill(pid, 0);
+                        alive = true;
+                    } catch (e) {
+                        // EPERM means the process exists but we lack permission to signal it.
+                        if (e && e.code === 'EPERM') alive = true;
+                    }
+                }
+
+                if (!alive) {
+                    meta.last_run_status = 'failed';
+                    meta.last_run_pid = null;
+                    meta.updated_at = new Date().toISOString();
+                    changed = true;
+                }
+            }
+
+            if (changed) {
+                await this.saveMetadata(metadata);
+                console.log('🧹 Reconciled stale running backups in backups-metadata.yaml');
+            }
+        } catch (error) {
+            console.warn('⚠️ Failed to reconcile stale running backups:', error.message);
+        }
     }
 
     /**
