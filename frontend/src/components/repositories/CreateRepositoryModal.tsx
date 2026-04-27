@@ -1544,7 +1544,7 @@ const CreateRepositoryModal: React.FC<CreateRepositoryModalProps> = ({
                           setPathRequiresCreation(false);
                         }}
                         className="w-full px-3 py-2 pr-10 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                        placeholder="/var/backups/borg"
+                        placeholder={createForm.repository_type === 'hetzner' ? './backups' : '/var/backups/borg'}
                         required
                       />
                       {/* Browse button for local filesystem */}
@@ -1602,13 +1602,33 @@ const CreateRepositoryModal: React.FC<CreateRepositoryModalProps> = ({
                   </div>
                   {/* Path test result */}
                   {pathTestResult.status !== 'idle' && (
-                    <div className={`mt-2 flex items-center text-sm ${pathTestResult.status === 'success' ? 'text-green-600' :
+                    <div className={`mt-2 flex items-start text-sm ${pathTestResult.status === 'success' ? 'text-green-600' :
                       pathTestResult.status === 'error' ? 'text-red-600' : 'text-blue-600'
                       }`}>
-                      {pathTestResult.status === 'success' && <CheckCircle className="w-4 h-4 mr-1" />}
-                      {pathTestResult.status === 'error' && <XCircle className="w-4 h-4 mr-1" />}
-                      {pathTestResult.status === 'testing' && <RefreshCw className="w-4 h-4 mr-1 animate-spin" />}
-                      {pathTestResult.message}
+                      {pathTestResult.status === 'success' && <CheckCircle className="w-4 h-4 mr-1 mt-0.5 flex-shrink-0" />}
+                      {pathTestResult.status === 'error' && <XCircle className="w-4 h-4 mr-1 mt-0.5 flex-shrink-0" />}
+                      {pathTestResult.status === 'testing' && <RefreshCw className="w-4 h-4 mr-1 mt-0.5 flex-shrink-0 animate-spin" />}
+                      <span className="whitespace-pre-line break-words">{pathTestResult.message}</span>
+                    </div>
+                  )}
+
+                  {/* Hetzner path semantics helper */}
+                  {createForm.repository_type === 'hetzner' && (
+                    <div className="mt-2 p-2 bg-blue-50 border border-blue-200 rounded text-xs text-blue-800">
+                      <strong>📦 Hetzner path tip:</strong> Hetzner paths are <em>relative to your Storage Box home directory</em>.
+                      The folder browser shows your writable area as <code className="bg-blue-100 px-1 rounded">/home/&lt;name&gt;</code>,
+                      but over SSH that's the same place as <code className="bg-blue-100 px-1 rounded">./&lt;name&gt;</code>.
+                      Absolute paths like <code className="bg-blue-100 px-1 rounded">/test</code> point to a read-only chroot root and Borg
+                      will fail with <em>"Read-only file system"</em>. We will save your repository at:{' '}
+                      <code className="bg-white px-1 rounded border border-blue-200 font-mono break-all">
+                        ssh://{createForm.username || 'user'}@{createForm.host || 'host'}:{createForm.port || 23}/./{(createForm.path || 'borg')
+                          .replace(/^local:/i, '')
+                          .replace(/^\/+home\/+/i, '')
+                          .replace(/^\/+/, '')
+                          .replace(/^\.\/+/, '')
+                          .replace(/^~\/+/, '')
+                          .replace(/\/+$/, '') || 'borg'}
+                      </code>
                     </div>
                   )}
 
@@ -2034,7 +2054,22 @@ const CreateRepositoryModal: React.FC<CreateRepositoryModalProps> = ({
         sshPassword={createForm.ssh_password}
         currentPath={createForm.path}
         onSelectPath={(selectedPath) => {
-          setCreateForm({ ...createForm, path: selectedPath });
+          // For Hetzner, the SFTP folder browser shows the writable area as
+          // /home/<name>, but Borg over SSH lands directly in the home dir.
+          // Convert /home/<x> -> ./<x> so we end up writing into the user's
+          // own area rather than the read-only chroot root.
+          let pathToSet = selectedPath;
+          if (createForm.repository_type === 'hetzner' && pathToSet) {
+            const cleaned = pathToSet
+              .replace(/^local:/i, '')
+              .replace(/^\/+home\/+/i, '')
+              .replace(/^\/+/, '')
+              .replace(/^\.\/+/, '')
+              .replace(/^~\/+/, '')
+              .replace(/\/+$/, '');
+            pathToSet = cleaned ? `./${cleaned}` : './borg';
+          }
+          setCreateForm({ ...createForm, path: pathToSet });
           setPathTestResult({ status: 'idle', message: '' });
           setPathRequiresCreation(false);
           setShowSSHBrowser(false);

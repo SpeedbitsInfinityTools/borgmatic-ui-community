@@ -3,33 +3,90 @@ const path = require('path');
 // os module removed - using config.dataDir for SSH keys storage
 
 /**
+ * Detect whether a host is a Hetzner Storage Box.
+ * Used to decide whether to apply the relative-to-home path normalization.
+ * @param {string} host
+ * @returns {boolean}
+ */
+function isHetznerHost(host) {
+    if (!host) return false;
+    const h = String(host).toLowerCase();
+    return /\.your-storagebox\.de$/.test(h) || h.includes('storagebox');
+}
+
+/**
+ * Normalize a user-entered repository path for a Hetzner Storage Box.
+ *
+ * Background: Hetzner Storage Boxes expose two views of the same filesystem:
+ *   - Over SFTP, the daemon chroots into a virtual root that contains /home,
+ *     so the folder browser sees the writable area as "/home/<dir>".
+ *   - Over SSH (which is what Borg uses), the user lands directly in their
+ *     home directory; what SFTP calls "/home/<dir>" is "~/<dir>" over SSH.
+ *
+ * Consequence: an absolute SSH path like "/test" points at the chroot's
+ * read-only virtual root, and `borg init` fails with
+ *   OSError: [Errno 30] Read-only file system: '/test'
+ *
+ * Fix: always express Hetzner paths as relative to the user's home directory
+ * using Borg's "/./<rel>" syntax, and strip any "/home/" prefix that may have
+ * leaked in from the SFTP folder browser.
+ *
+ * @param {string} repoPath
+ * @returns {string} Path component beginning with "/./" (e.g. "/./backups")
+ */
+function normalizeHetznerRepoPath(repoPath) {
+    let p = String(repoPath || '').trim();
+    p = p.replace(/^local:/i, '');
+    p = p.replace(/^\/+home\/+/i, '');
+    p = p.replace(/^\/+/, '');
+    p = p.replace(/^\.\/+/, '');
+    p = p.replace(/^~\/+/, '');
+    p = p.replace(/\/+$/, '');
+    if (!p) {
+        p = 'borg';
+    }
+    return `/./${p}`;
+}
+
+/**
  * Helper function to construct SSH repository path
  * Handles version-specific path syntax:
  * - Borg 1.x: ssh://user@host:port/absolute/path (direct absolute path)
  * - Borg 1.x relative: ssh://user@host:port/./relative/path (dot prefix for relative to home)
  * - Borg 2.x: ssh://user@host:port//absolute/path (double slash for absolute)
- * 
+ *
+ * Hetzner Storage Boxes always use the relative-to-home form, regardless of
+ * Borg version, because absolute paths target the read-only chroot root.
+ *
  * @param {string} username - SSH username
  * @param {string} host - SSH host
  * @param {number} port - SSH port (default: 22)
  * @param {string} repoPath - Repository path on remote system
  * @param {string} borgVersion - '1.x' or '2.x' (default: '1.x')
+ * @param {string} repositoryType - 'ssh' | 'sftp' | 'hetzner' (default: 'ssh')
  * @returns {string} SSH repository path in format ssh://user@host:port/path
  */
-function constructSSHPath(username, host, port, repoPath, borgVersion = '1.x') {
+function constructSSHPath(username, host, port, repoPath, borgVersion = '1.x', repositoryType = 'ssh') {
     const portPart = port && port !== 22 ? `:${port}` : '';
-    
+
+    const treatAsHetzner = repositoryType === 'hetzner' || isHetznerHost(host);
+
+    if (treatAsHetzner) {
+        const normalizedPath = normalizeHetznerRepoPath(repoPath);
+        return `ssh://${username}@${host}${portPart}${normalizedPath}`;
+    }
+
     // Ensure path starts with /
     let normalizedPath = repoPath;
     if (!normalizedPath.startsWith('/')) {
         normalizedPath = '/' + normalizedPath;
     }
-    
+
     // Handle version-specific absolute path syntax
     // For absolute paths (starting with / but not /~ for home-relative, not /./ for relative)
     // Also guard against paths that already have // (user might have entered it manually)
-    if (normalizedPath.startsWith('/') && 
-        !normalizedPath.startsWith('/~') && 
+    if (normalizedPath.startsWith('/') &&
+        !normalizedPath.startsWith('/~') &&
         !normalizedPath.startsWith('/./') &&
         !normalizedPath.startsWith('//')) {
         if (borgVersion === '2.x') {
@@ -39,7 +96,7 @@ function constructSSHPath(username, host, port, repoPath, borgVersion = '1.x') {
         // Borg 1.x: absolute paths work directly (ssh://user@host:port/absolute/path)
         // No modification needed for 1.x
     }
-    
+
     return `ssh://${username}@${host}${portPart}${normalizedPath}`;
 }
 
@@ -155,6 +212,8 @@ module.exports = {
     constructSSHPath,
     constructS3Path,
     constructNativeRclonePath,
-    writeSSHKeyToFilesystem
+    writeSSHKeyToFilesystem,
+    isHetznerHost,
+    normalizeHetznerRepoPath
 };
 

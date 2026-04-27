@@ -67,6 +67,71 @@ function parseSSHError(stderr, stdout = '') {
 }
 
 /**
+ * Build an actionable hint for an SSH/SFTP test failure, especially for
+ * Hetzner Storage Boxes where exit code 255 / "connection failed" is very
+ * unhelpful on its own. Returns null if there's nothing useful to add.
+ */
+function buildSSHFailureHint({ host, port, exitCode, stderr, isHetzner }) {
+    const err = String(stderr || '');
+    const lines = [];
+
+    if (/Permission denied/i.test(err)) {
+        lines.push(
+            '• The server rejected the SSH key — make sure THIS exact public key is installed on the target.',
+        );
+        if (isHetzner) {
+            lines.push(
+                "  For Hetzner Storage Boxes the public key must be uploaded via the Robot UI (Storagebox → 'SSH-Keys') or via:",
+                '    cat key.pub | ssh -p23 user@host install-ssh-key',
+            );
+        }
+    }
+
+    if (/Connection timed out/i.test(err) || /No route to host/i.test(err)) {
+        lines.push(
+            '• Could not reach the host — verify outbound TCP is open from this server',
+            isHetzner
+                ? `    (Hetzner Storage Boxes listen on ports 22 and 23; some hosting providers block 23 outbound).`
+                : `    (default SSH port 22).`,
+        );
+    }
+
+    if (/Could not resolve hostname/i.test(err)) {
+        lines.push(`• DNS lookup for "${host}" failed from this server.`);
+    }
+
+    if (/Host key verification failed/i.test(err)) {
+        lines.push('• Host key changed — remove the stale entry from your known_hosts and retry.');
+    }
+
+    if (/no matching .* found/i.test(err) || /no mutual signature algorithm/i.test(err)) {
+        lines.push(
+            '• Older host/key algorithm required by the server. Retry from a host with a more recent OpenSSH,',
+            '  or add the legacy algorithm explicitly to /etc/ssh/ssh_config (HostKeyAlgorithms / KexAlgorithms).',
+        );
+    }
+
+    // Fallback explanation when SSH/SFTP just returns 255 with no usable stderr.
+    if (lines.length === 0 && Number(exitCode) === 255) {
+        if (isHetzner) {
+            lines.push(
+                'Exit code 255 means the connection failed before login. For Hetzner Storage Boxes the usual causes are:',
+                '  • The public key is not installed on this Storagebox (each box has its own authorized_keys)',
+                '  • Outbound TCP to the chosen port is blocked from this server',
+                '  • A required host or key algorithm is disabled in the local sshd/ssh_config',
+                'Tip: from a shell on this server, try the same SSH connection with `-vvv` to see the precise failure.',
+            );
+        } else {
+            lines.push(
+                'Exit code 255 means SSH could not establish a session. Run with `-vvv` from this server to diagnose.',
+            );
+        }
+    }
+
+    return lines.length ? lines.join('\n') : null;
+}
+
+/**
  * Discover Borg repositories on remote SSH system
  * @param {Object} options - SSH connection options
  * @returns {Promise<Array>} Array of discovered repositories
@@ -836,9 +901,27 @@ router.post('/test-connection', authenticateToken, requireAdmin, async (req, res
                             await fs.remove(tempKeyPath).catch(() => { });
                         }
 
+                        // For Hetzner the SFTP test runs with `reject: false`, so we land
+                        // here with exit code 255 / 1 etc. and useful info in stderr —
+                        // surface it to the user instead of just the bare exit code.
+                        const rawError = (result.stderr || '').trim() || (result.stdout || '').trim();
+                        const friendlyError = parseSSHError(rawError, result.stdout || '');
+                        const hint = buildSSHFailureHint({
+                            host,
+                            port,
+                            exitCode,
+                            stderr: result.stderr || '',
+                            isHetzner,
+                        });
+                        const detail = [
+                            `${repository_type.toUpperCase()} connection failed`,
+                            friendlyError && `(${friendlyError})`,
+                            `exit code ${exitCode}`,
+                        ].filter(Boolean).join(' ');
                         return res.status(500).json({
                             success: false,
-                            detail: `${repository_type.toUpperCase()} connection failed with exit code ${exitCode}`
+                            detail: hint ? `${detail}\n\n${hint}` : detail,
+                            stderr: rawError || undefined,
                         });
                     }
                 } catch (sshError) {
@@ -857,9 +940,18 @@ router.post('/test-connection', authenticateToken, requireAdmin, async (req, res
                     });
                     const rawError = sshError.stderr || sshError.stdout || sshError.message || sshError.toString();
                     const friendlyError = parseSSHError(rawError, sshError.stdout);
+                    const hint = buildSSHFailureHint({
+                        host,
+                        port,
+                        exitCode: sshError.exitCode,
+                        stderr: sshError.stderr || '',
+                        isHetzner,
+                    });
+                    const detail = `${repository_type.toUpperCase()} connection failed: ${friendlyError}`;
                     return res.status(500).json({
                         success: false,
-                        detail: `${repository_type.toUpperCase()} connection failed: ${friendlyError}`,
+                        detail: hint ? `${detail}\n\n${hint}` : detail,
+                        stderr: rawError || undefined,
                         error: process.env.NODE_ENV === 'development' ? sshError.stack : undefined
                     });
                 }

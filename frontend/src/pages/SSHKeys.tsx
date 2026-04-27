@@ -125,11 +125,15 @@ const SSHKeys: React.FC = () => {
           }
         }
       } else {
+        const fullError = connectionTest.error || 'SSH connection failed';
         setTestResult({
           success: false,
-          error: connectionTest.error || 'SSH connection failed'
+          error: fullError
         });
-        toast.error(`SSH connection failed: ${connectionTest.error}`);
+        // Keep the toast concise — show the first line only; the full multi-line
+        // explanation (including Hetzner hints) is rendered in the inline panel.
+        const firstLine = String(fullError).split('\n')[0].trim();
+        toast.error(`SSH connection failed: ${firstLine}`);
       }
     },
     onError: (error: any) => {
@@ -831,7 +835,7 @@ const SSHKeys: React.FC = () => {
                         <XCircle className="w-5 h-5 text-red-600 flex-shrink-0" />
                       )}
                       <div className="flex-1">
-                        <p className={`text-sm font-medium ${testResult.success ? 'text-green-800' : 'text-red-800'
+                        <p className={`text-sm font-medium whitespace-pre-line ${testResult.success ? 'text-green-800' : 'text-red-800'
                           }`}>
                           {testResult.success
                             ? (testResult.message || 'SSH connection successful!')

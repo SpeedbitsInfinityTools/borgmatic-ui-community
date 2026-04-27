@@ -123,8 +123,22 @@ router.post('/', authenticateToken, requireAdmin, async (req, res) => {
         }
         // For SSH/SFTP/Hetzner, construct SSH path (version-aware for Borg 1.x vs 2.x path syntax)
         else if ((repository_type === 'ssh' || repository_type === 'sftp' || repository_type === 'hetzner') && host && username) {
-            const repoPathPart = repoPath || '/backups/repo';
-            actualRepoPath = constructSSHPath(username, host, port || 22, repoPathPart, borg_version || '1.x');
+            // Hetzner Storage Boxes need a relative-to-home path because the
+            // SFTP-visible /home/<x> is the same physical place as the SSH
+            // home directory ~/<x>. constructSSHPath() handles that conversion
+            // when the repository_type is 'hetzner' (or the host matches the
+            // Hetzner pattern).
+            const defaultPath = repository_type === 'hetzner' ? 'borg' : '/backups/repo';
+            const repoPathPart = repoPath || defaultPath;
+            actualRepoPath = constructSSHPath(
+                username,
+                host,
+                port || 22,
+                repoPathPart,
+                borg_version || '1.x',
+                repository_type
+            );
+            console.log(`📦 Using ${repository_type.toUpperCase()} repository path: ${actualRepoPath}`);
         }
 
         if (!actualRepoPath) {

@@ -98,7 +98,29 @@ router.put('/by-path/:path', authenticateToken, requireAdmin, async (req, res) =
         } else {
             existingRepo = unusedRepos[unusedIndex];
         }
-        const repoType = existingRepo.repository_type || 'local';
+        const repoType = (existingRepo.repository_type || 'local').toLowerCase();
+        // Infer type from path when legacy entries were stored with repository_type=local
+        // even though their path is ssh://..., sftp://..., s3:..., etc.
+        const normalizedRepoPath = String(existingRepo.path || '').replace(/^local:/i, '');
+        const inferredRepoType = (() => {
+            if (repoType === 'ssh' || repoType === 'sftp' || repoType === 'hetzner' || repoType === 's3' || repoType === 'rclone') {
+                return repoType;
+            }
+            if (/^s3:/i.test(normalizedRepoPath)) return 's3';
+            if (/^rclone:/i.test(normalizedRepoPath)) return 'rclone';
+            if (/^sftp:\/\//i.test(normalizedRepoPath)) return 'sftp';
+            if (/^ssh:\/\//i.test(normalizedRepoPath)) {
+                return /(^|@)[a-z0-9-]+\.your-storagebox\.de(:|\/|$)/i.test(normalizedRepoPath)
+                    ? 'hetzner'
+                    : 'ssh';
+            }
+            return repoType || 'local';
+        })();
+        // Hetzner Storage Boxes are SSH-based; treat them like SSH for credential
+        // edits (key/password updates) and credential persistence.
+        const isSSHFamily =
+            inferredRepoType === 'ssh' || inferredRepoType === 'sftp' || inferredRepoType === 'hetzner';
+        const isS3 = inferredRepoType === 's3';
 
         // Validate name
         if (name !== undefined) {
@@ -136,7 +158,7 @@ router.put('/by-path/:path', authenticateToken, requireAdmin, async (req, res) =
         }
 
         // Update credentials if provided (but don't change path/type)
-        if (repoType === 'ssh' || repoType === 'sftp') {
+        if (isSSHFamily) {
             // Determine auth method: use provided, or infer from provided credentials, or keep existing
             let authMethod;
             if (ssh_auth_method) {
@@ -165,7 +187,7 @@ router.put('/by-path/:path', authenticateToken, requireAdmin, async (req, res) =
                     }
                 }
             }
-        } else if (repoType === 's3') {
+        } else if (isS3) {
             // Update S3 fields if provided
             if (s3_endpoint !== undefined) updates.s3_endpoint = s3_endpoint;
             if (s3_bucket !== undefined) updates.s3_bucket = s3_bucket;
@@ -190,7 +212,7 @@ router.put('/by-path/:path', authenticateToken, requireAdmin, async (req, res) =
         // Store encrypted credentials if provided
         const actualRepoPath = updates.path || oldRepoPath;
 
-        if (repoType === 'ssh' || repoType === 'sftp') {
+        if (isSSHFamily) {
             // Determine auth method: use provided, or infer from provided credentials, or keep existing
             let authMethod;
             if (ssh_auth_method) {
@@ -241,7 +263,7 @@ router.put('/by-path/:path', authenticateToken, requireAdmin, async (req, res) =
                     }
                 }
             }
-        } else if (repoType === 's3') {
+        } else if (isS3) {
             if (s3_access_key && s3_secret_key) {
                 await repositoryCredentials.storeS3Credentials(actualRepoPath, {
                     access_key: s3_access_key,

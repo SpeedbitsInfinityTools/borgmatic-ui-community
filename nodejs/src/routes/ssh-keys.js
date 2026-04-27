@@ -841,44 +841,153 @@ async function generateSSHKeyPair(keyType) {
 }
 
 /**
+ * Hetzner Storage Boxes don't expose a normal shell — they answer SSH commands
+ * with a restricted command interpreter (no `echo`, no `bash`, etc.) and abort
+ * with "Command not found. Use 'help' to get a list of available commands."
+ * which is exit code 8.
+ *
+ * We detect Hetzner from the standard hostname pattern + port 23, or fall back
+ * to recognizing the response text after the command runs (so corporate
+ * jump hosts and other restricted shells also get a meaningful result).
+ */
+function looksLikeHetznerStorageBox(host, port) {
+    if (!host) return false;
+    // Avoid false positives: port 23 alone is not enough (users can run normal
+    // SSH daemons on custom ports). Prefer hostname pattern checks.
+    return /\.your-storagebox\.de$/i.test(host) || /storagebox/i.test(host);
+}
+
+function looksLikeRestrictedShellResponse(text) {
+    if (!text) return false;
+    return (
+        /Command not found\./i.test(text) ||
+        /Use 'help' to get a list of available commands/i.test(text) ||
+        /This service allows sftp connections only/i.test(text)
+    );
+}
+
+/**
+ * Build an actionable hint for an SSH/SFTP test failure, especially for
+ * Hetzner Storage Boxes where exit code 255 carries no useful info on its own.
+ * Returns null if there's nothing useful to add.
+ */
+function buildHetznerSSHHint({ host, port, exitCode, stderr, isHetzner }) {
+    const err = String(stderr || '');
+    const lines = [];
+
+    if (/Permission denied/i.test(err)) {
+        lines.push(
+            '• The server rejected the SSH key — make sure THIS exact public key is installed on the target.',
+        );
+        if (isHetzner) {
+            lines.push(
+                "  For Hetzner Storage Boxes the public key must be uploaded via the Robot UI (Storagebox → 'SSH-Keys') or via:",
+                '    cat key.pub | ssh -p23 user@host install-ssh-key',
+            );
+        }
+    }
+
+    if (/Connection timed out/i.test(err) || /No route to host/i.test(err)) {
+        lines.push(
+            '• Could not reach the host — verify outbound TCP is open from this server',
+            isHetzner
+                ? `    (Hetzner Storage Boxes listen on ports 22 and 23; some firewalls block 23.)`
+                : `    (default SSH port 22).`,
+        );
+    }
+
+    if (/Could not resolve hostname/i.test(err)) {
+        lines.push(`• DNS lookup for "${host}" failed from this server.`);
+    }
+
+    if (/Host key verification failed/i.test(err)) {
+        lines.push('• Host key changed — remove the stale entry from your known_hosts and retry.');
+    }
+
+    if (/no matching .* found/i.test(err) || /no mutual signature algorithm/i.test(err)) {
+        lines.push(
+            '• Older host/key algorithm required by the server. If this is a Hetzner Storage Box,',
+            '  retry from a host with a more recent OpenSSH or add legacy algorithms to /etc/ssh/ssh_config.',
+        );
+    }
+
+    // Fallback explanation for the bare "exit code 255" case.
+    if (lines.length === 0 && Number(exitCode) === 255) {
+        if (isHetzner) {
+            lines.push(
+                'Exit code 255 from ssh/sftp means the connection itself failed before login — common causes for Hetzner:',
+                '  • The public key is not registered on this Storagebox',
+                '  • Outbound TCP to port 23 is blocked from this server',
+                '  • A required host or key algorithm is disabled in the local sshd/ssh_config',
+                'Run the same command from this server with `-vvv` to see exactly which step fails.',
+            );
+        } else {
+            lines.push(
+                'Exit code 255 means SSH could not establish a session. Run with `-vvv` from this server to diagnose.',
+            );
+        }
+    }
+
+    return lines.length ? lines.join('\n') : null;
+}
+
+/**
  * Test SSH connection using the specified key
  */
 async function testSSHKeyConnection(sshKey, host, username, port) {
     let tempDir = null;
-    
+
     try {
         // Decrypt private key
         const privateKey = decryptPrivateKey(sshKey.private_key);
-        
+
         // Decrypt passphrase if key is encrypted
         let passphrase = null;
         if (sshKey.is_encrypted && sshKey.passphrase_encrypted) {
             passphrase = decryptPrivateKey(sshKey.passphrase_encrypted);
         }
-        
+
         // Create secure temporary key file
         const { tempDir: dir, tempFile } = await createSecureTempFile(privateKey, 'ssh-test-');
         tempDir = dir;
-        
-        // Test SSH connection with sanitized parameters
-        // Use separate arguments to prevent command injection
-        const cmd = [
-            'ssh', '-i', tempFile, 
-            '-o', 'StrictHostKeyChecking=accept-new',
-            '-o', 'ConnectTimeout=10',
-            '-o', 'UserKnownHostsFile=/dev/null',
-            '-o', 'LogLevel=ERROR',
-            '-p', port.toString(),
-            `${username}@${host}`,
-            'echo "SSH connection successful"'
-        ];
+
+        const isHetzner = looksLikeHetznerStorageBox(host, port);
+        const parsedPort = Number(port);
+        const effectivePort = Number.isFinite(parsedPort) && parsedPort > 0
+            ? parsedPort
+            : (isHetzner ? 23 : 22);
+
+        // For Hetzner Storage Boxes the only reliable test is via SFTP — they
+        // reject any shell command. For everything else we run a cheap `echo`
+        // over a regular SSH session and additionally probe for borg.
+        const cmd = isHetzner
+            ? [
+                'sftp',
+                '-i', tempFile,
+                '-oStrictHostKeyChecking=accept-new',
+                '-oConnectTimeout=10',
+                '-oUserKnownHostsFile=/dev/null',
+                '-oBatchMode=no',
+                '-P', effectivePort.toString(),
+                `${username}@${host}`,
+            ]
+            : [
+                'ssh', '-i', tempFile,
+                '-o', 'StrictHostKeyChecking=accept-new',
+                '-o', 'ConnectTimeout=10',
+                '-o', 'UserKnownHostsFile=/dev/null',
+                '-o', 'LogLevel=ERROR',
+                '-p', effectivePort.toString(),
+                `${username}@${host}`,
+                'echo "SSH connection successful"',
+            ];
         
         // If key is encrypted, we need to provide the passphrase
         // BatchMode=yes prevents passphrase prompts, so we remove it for encrypted keys
         // Instead, we'll use sshpass if available, or expect script
         const env = { ...process.env };
         let useSshpass = false;
-        
+
         if (passphrase) {
             // Check if sshpass is available for encrypted keys
             try {
@@ -888,7 +997,7 @@ async function testSSHKeyConnection(sshKey, host, username, port) {
                 // sshpass not available, will try SSH_ASKPASS as fallback
                 useSshpass = false;
             }
-            
+
             if (useSshpass) {
                 // Use sshpass with passphrase flag (-P) for encrypted keys
                 // sshpass -P prompts for passphrase, but we can use -e with env var
@@ -908,77 +1017,126 @@ async function testSSHKeyConnection(sshKey, host, username, port) {
                 env.SSH_ASKPASS_REQUIRE = 'force'; // Force use of SSH_ASKPASS
                 // Remove BatchMode for encrypted keys to allow passphrase prompt
             }
-        } else {
-            // For non-encrypted keys, use BatchMode=yes for faster failure
-            // Insert after '-i' and tempFile (at index 3)
+        } else if (!isHetzner) {
+            // For non-encrypted keys, use BatchMode=yes for faster failure.
+            // SFTP uses different option syntax (-oFoo=Bar), so we only inject
+            // BatchMode for the SSH path; SFTP gets BatchMode=no in its initial
+            // option list (it shouldn't prompt anyway).
             cmd.splice(3, 0, '-o', 'BatchMode=yes');
         }
-        
+
         // Additional security: validate final command construction
         const targetHost = `${username}@${host}`;
         if (containsShellMetacharacters(targetHost)) {
             throw new Error('Invalid characters detected in host/username combination');
         }
-        
-        const result = await execa(cmd[0], cmd.slice(1), { timeout: 15000, env });
-        
-        // If execa doesn't throw, the command succeeded
-        // execa only throws on non-zero exit codes or other errors
-        const output = result.stdout?.trim() || '';
-        const exitCode = result.exitCode ?? 0; // Default to 0 if undefined
-        
-        // Exit code 0 means success
-        if (exitCode === 0) {
-            // SSH connection successful, now check for borg installation
-            let borgCheck = { installed: false, version: null, error: null };
-            
-            try {
-                // Build borg check command (same SSH setup)
-                const borgCmd = [...cmd]; // Copy the command
-                // Replace the echo command with borg version check
-                borgCmd[borgCmd.length - 1] = 'borg --version 2>/dev/null || echo "BORG_NOT_FOUND"';
-                
-                const borgResult = await execa(borgCmd[0], borgCmd.slice(1), { timeout: 15000, env });
-                const borgOutput = borgResult.stdout?.trim() || '';
-                
-                if (borgOutput.includes('BORG_NOT_FOUND') || borgOutput === '') {
-                    borgCheck = {
-                        installed: false,
-                        version: null,
-                        error: 'Borg is not installed on the remote server. Install with: apt install borgbackup'
-                    };
-                } else if (borgOutput.toLowerCase().includes('borg')) {
-                    borgCheck = {
-                        installed: true,
-                        version: borgOutput,
-                        error: null
-                    };
-                } else {
-                    borgCheck = {
-                        installed: false,
-                        version: null,
-                        error: 'Could not determine borg status'
-                    };
-                }
-            } catch (borgError) {
+
+        // For SFTP we can't pass an inline command — feed `pwd\nbye\n` via stdin.
+        // We use reject: false so a Hetzner restricted shell exit code doesn't
+        // throw before we can inspect the actual response.
+        const execOpts = { timeout: 15000, env, reject: false };
+        if (isHetzner) execOpts.input = 'pwd\nbye\n';
+        const result = await execa(cmd[0], cmd.slice(1), execOpts);
+
+        const output = (result.stdout || '').trim();
+        const stderr = (result.stderr || '').trim();
+        const exitCode = result.exitCode ?? 0;
+
+        // Restricted-shell servers (Hetzner Storage Box, some jump hosts) reply
+        // with "Command not found. Use 'help' to ..." when we run `echo`. That
+        // means *authentication succeeded* — it's the remote shell rejecting the
+        // test command, not the SSH transport failing. Treat it as success.
+        const restrictedShell = !isHetzner && (
+            looksLikeRestrictedShellResponse(stderr) ||
+            looksLikeRestrictedShellResponse(output)
+        );
+
+        if (exitCode === 0 || restrictedShell) {
+            // SSH connection successful. For Hetzner / restricted shells we can't
+            // probe borg over the wire; report success and let the caller decide.
+            let borgCheck;
+
+            if (isHetzner) {
+                borgCheck = {
+                    installed: true,
+                    version: 'Hetzner pre-installed (borg-1.1, borg-1.2, borg-1.4)',
+                    error: null,
+                };
+            } else if (restrictedShell) {
                 borgCheck = {
                     installed: false,
                     version: null,
-                    error: `Failed to check borg: ${borgError.message}`
+                    error: 'Authentication succeeded but the remote shell is restricted — borg cannot be probed.',
                 };
+            } else {
+                borgCheck = { installed: false, version: null, error: null };
+                try {
+                    // Build borg check command (same SSH setup)
+                    const borgCmd = [...cmd]; // Copy the command
+                    // Replace the echo command with borg version check
+                    borgCmd[borgCmd.length - 1] = 'borg --version 2>/dev/null || echo "BORG_NOT_FOUND"';
+
+                    const borgResult = await execa(borgCmd[0], borgCmd.slice(1), { timeout: 15000, env });
+                    const borgOutput = borgResult.stdout?.trim() || '';
+
+                    if (borgOutput.includes('BORG_NOT_FOUND') || borgOutput === '') {
+                        borgCheck = {
+                            installed: false,
+                            version: null,
+                            error: 'Borg is not installed on the remote server. Install with: apt install borgbackup'
+                        };
+                    } else if (borgOutput.toLowerCase().includes('borg')) {
+                        borgCheck = {
+                            installed: true,
+                            version: borgOutput,
+                            error: null
+                        };
+                    } else {
+                        borgCheck = {
+                            installed: false,
+                            version: null,
+                            error: 'Could not determine borg status'
+                        };
+                    }
+                } catch (borgError) {
+                    borgCheck = {
+                        installed: false,
+                        version: null,
+                        error: `Failed to check borg: ${borgError.message}`
+                    };
+                }
             }
             
+            const message = isHetzner
+                ? 'Hetzner Storage Box connection successful (SFTP)'
+                : restrictedShell
+                  ? "Authentication succeeded — but the remote refuses shell commands (restricted shell). For Hetzner Storage Boxes, configure the repository as type 'Hetzner'."
+                  : 'SSH connection successful';
+
             return {
                 success: true,
-                message: 'SSH connection successful',
+                message,
                 output: output || 'Connection established successfully',
-                borg: borgCheck
+                borg: borgCheck,
+                hetzner: isHetzner || undefined,
+                restricted_shell: restrictedShell || undefined,
             };
         } else {
+            // Build a helpful error for common failure modes — especially for
+            // Hetzner Storage Boxes where exit code 255 from sftp/ssh tells us
+            // almost nothing on its own.
+            const rawError = stderr || output || 'SSH connection failed';
+            const hint = buildHetznerSSHHint({
+                host,
+                port: effectivePort,
+                exitCode,
+                stderr,
+                isHetzner,
+            });
             return {
                 success: false,
-                error: result.stderr || 'SSH connection failed',
-                return_code: exitCode
+                error: hint ? `${rawError}\n\n${hint}` : rawError,
+                return_code: exitCode,
             };
         }
     } catch (error) {
@@ -989,9 +1147,22 @@ async function testSSHKeyConnection(sshKey, host, username, port) {
             stdout: error.stdout,
             exitCode: error.exitCode
         });
+        const isHetzner = looksLikeHetznerStorageBox(host, port);
+        const parsedPort = Number(port);
+        const effectivePort = Number.isFinite(parsedPort) && parsedPort > 0
+            ? parsedPort
+            : (isHetzner ? 23 : 22);
+        const hint = buildHetznerSSHHint({
+            host,
+            port: effectivePort,
+            exitCode: error.exitCode,
+            stderr: error.stderr,
+            isHetzner,
+        });
+        const baseError = error.stderr || error.message || 'SSH connection failed';
         return {
             success: false,
-            error: error.stderr || error.message || 'SSH connection failed',
+            error: hint ? `${baseError}\n\n${hint}` : baseError,
             return_code: error.exitCode || -1,
             details: error.stdout || ''
         };

@@ -1,19 +1,58 @@
 import React from 'react';
-import { X, CheckCircle, AlertTriangle } from 'lucide-react';
+import { X, CheckCircle, AlertTriangle, Key, Lock as LockIcon } from 'lucide-react';
 import { Repository } from '../../types/repositories';
-import { getDisplayPath, getCompressionLabel } from '../../utils/repositoryUtils';
+import {
+  getDisplayPath,
+  getCompressionLabel,
+  inferRepositoryType,
+} from '../../utils/repositoryUtils';
 import { formatDate } from '../../utils/dateFormat';
 
 interface ViewRepositoryModalProps {
   repository: Repository | null;
   onClose: () => void;
+  sshKeysData?: any;
 }
 
 const ViewRepositoryModal: React.FC<ViewRepositoryModalProps> = ({
   repository,
   onClose,
+  sshKeysData,
 }) => {
   if (!repository) return null;
+
+  const inferredType = inferRepositoryType(repository);
+  const isSSHFamily =
+    inferredType === 'ssh' || inferredType === 'sftp' || inferredType === 'hetzner';
+
+  // Resolve a friendly SSH key name when applicable
+  const sshKeys = sshKeysData?.data?.ssh_keys || sshKeysData?.ssh_keys || [];
+  const sshKeyName = repository.ssh_key_id
+    ? sshKeys.find((k: any) => String(k.id) === String(repository.ssh_key_id))?.name ||
+      `Key #${repository.ssh_key_id}`
+    : null;
+
+  // Decide what to show in the Authentication row
+  let authDisplay: React.ReactNode = null;
+  if (isSSHFamily) {
+    const authMethod =
+      repository.ssh_auth_method || (repository.ssh_key_id ? 'key' : 'password');
+    if (authMethod === 'key') {
+      authDisplay = (
+        <span className="inline-flex items-center">
+          <Key className="w-4 h-4 mr-2 text-emerald-600" />
+          SSH key:&nbsp;<span className="font-mono">{sshKeyName || 'unknown'}</span>
+        </span>
+      );
+    } else {
+      authDisplay = (
+        <span className="inline-flex items-center">
+          <LockIcon className="w-4 h-4 mr-2 text-emerald-600" />
+          Password (stored encrypted)
+        </span>
+      );
+    }
+  }
 
   return (
     <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50 flex items-center justify-center p-4">
@@ -39,7 +78,7 @@ const ViewRepositoryModal: React.FC<ViewRepositoryModalProps> = ({
           <div>
             <label className="block text-sm font-medium text-gray-700">Repository Type</label>
             <p className="mt-1 text-sm text-gray-900 bg-gray-50 px-3 py-2 rounded border capitalize">
-              {repository.repository_type || 'local'}
+              {inferredType}
             </p>
           </div>
 
@@ -49,6 +88,42 @@ const ViewRepositoryModal: React.FC<ViewRepositoryModalProps> = ({
               {getDisplayPath(repository)}
             </p>
           </div>
+
+          {/* Connection details for SSH/SFTP/Hetzner */}
+          {isSSHFamily && (repository.host || repository.username) && (
+            <div className="grid grid-cols-2 gap-4">
+              {repository.host && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700">Host</label>
+                  <p className="mt-1 text-sm text-gray-900 bg-gray-50 px-3 py-2 rounded border font-mono">
+                    {repository.host}
+                    {repository.port ? `:${repository.port}` : ''}
+                  </p>
+                </div>
+              )}
+              {repository.username && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700">Username</label>
+                  <p className="mt-1 text-sm text-gray-900 bg-gray-50 px-3 py-2 rounded border font-mono">
+                    {repository.username}
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Authentication */}
+          {authDisplay && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700">Authentication</label>
+              <p className="mt-1 text-sm text-gray-900 bg-gray-50 px-3 py-2 rounded border">
+                {authDisplay}
+              </p>
+              <p className="mt-1 text-xs text-gray-500">
+                Use <strong>Edit</strong> to change the SSH key or password and verify with <strong>Test Connection</strong>.
+              </p>
+            </div>
+          )}
 
           <div>
             <label className="block text-sm font-medium text-gray-700">Encryption</label>
@@ -60,7 +135,7 @@ const ViewRepositoryModal: React.FC<ViewRepositoryModalProps> = ({
           <div>
             <label className="block text-sm font-medium text-gray-700">Compression</label>
             <p className="mt-1 text-sm text-gray-900 bg-gray-50 px-3 py-2 rounded border">
-              {getCompressionLabel(repository.compression)}
+              {getCompressionLabel(repository.compression || '')}
             </p>
           </div>
 
@@ -129,4 +204,3 @@ const ViewRepositoryModal: React.FC<ViewRepositoryModalProps> = ({
 };
 
 export default ViewRepositoryModal;
-

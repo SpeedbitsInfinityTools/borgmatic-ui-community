@@ -10,7 +10,12 @@ import {
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { Repository, PathTestResult } from '../../types/repositories';
-import { getDisplayPath, getCompressionDescription, getEncryptionDescription } from '../../utils/repositoryUtils';
+import {
+  getDisplayPath,
+  getCompressionDescription,
+  getEncryptionDescription,
+  inferRepositoryType,
+} from '../../utils/repositoryUtils';
 import { useRepositoryMutations } from '../../hooks/useRepositories';
 
 interface EditRepositoryModalProps {
@@ -39,20 +44,27 @@ const EditRepositoryModal: React.FC<EditRepositoryModalProps> = ({
   const [sshPassword, setSshPassword] = useState('');
   const [pathTestResult, setPathTestResult] = useState<PathTestResult>({ status: 'idle', message: '' });
 
+  // What type the repository really is (handles legacy entries where
+  // repository_type is missing or wrongly set to 'local' for ssh:// paths).
+  const inferredType = repository ? inferRepositoryType(repository) : 'local';
+  const isSSHFamily =
+    inferredType === 'ssh' || inferredType === 'sftp' || inferredType === 'hetzner';
+
   // Extract SSH connection details from repository path
   const getSSHDetails = () => {
-    if (repository.repository_type !== 'ssh' && repository.repository_type !== 'sftp') {
-      return null;
-    }
+    if (!repository || !isSSHFamily) return null;
 
-    // Parse SSH path: ssh://user@host:port/path or ssh://user@host/path
-    // More flexible regex that handles paths correctly
-    const sshMatch = repository.path.match(/^ssh:\/\/([^@]+)@([^:/]+)(?::(\d+))?(.*)$/);
+    // Strip a stray "local:" prefix that may have been written historically
+    // (e.g. "local:ssh://user@host:23/./path").
+    const rawPath = (repository.path || '').replace(/^local:/, '');
+
+    // Parse: ssh://user@host:port/path or sftp://user@host:port/path
+    const sshMatch = rawPath.match(/^(?:ssh|sftp):\/\/([^@]+)@([^:/]+)(?::(\d+))?(.*)$/);
     if (sshMatch) {
       return {
         username: sshMatch[1],
         host: sshMatch[2],
-        port: sshMatch[3] ? parseInt(sshMatch[3]) : 22,
+        port: sshMatch[3] ? parseInt(sshMatch[3]) : (inferredType === 'hetzner' ? 23 : 22),
         path: sshMatch[4] || '/'
       };
     }
@@ -84,32 +96,23 @@ const EditRepositoryModal: React.FC<EditRepositoryModalProps> = ({
 
       // Extract SSH authentication method and credentials
       // Check if ssh_key_id exists first (more reliable than ssh_auth_method which might not be set for old repos)
-      const hasKeyId = (repository as any).ssh_key_id !== undefined && (repository as any).ssh_key_id !== null;
-      const authMethod = (repository as any).ssh_auth_method || (hasKeyId ? 'key' : 'password');
+      const hasKeyId = repository.ssh_key_id !== undefined && repository.ssh_key_id !== null;
+      const authMethod: 'key' | 'password' =
+        repository.ssh_auth_method || (hasKeyId ? 'key' : 'password');
       setSshAuthMethod(authMethod);
       if (authMethod === 'key' && hasKeyId) {
         // Handle both string UUIDs and numeric IDs - preserve the exact value
-        const keyId = (repository as any).ssh_key_id;
-        setSshKeyId(keyId);
+        setSshKeyId(repository.ssh_key_id ?? null);
       } else {
-        // If no key ID, set to null
         setSshKeyId(null);
       }
       // Note: SSH password is NOT populated for security - user must re-enter if changing
 
       // Extract S3 fields if available
-      if ((repository as any).s3_endpoint) {
-        setS3Endpoint((repository as any).s3_endpoint);
-      }
-      if ((repository as any).s3_region) {
-        setS3Region((repository as any).s3_region);
-      }
-      if ((repository as any).s3_bucket) {
-        setS3Bucket((repository as any).s3_bucket);
-      }
-      if ((repository as any).s3_path) {
-        setS3Path((repository as any).s3_path);
-      }
+      if (repository.s3_endpoint) setS3Endpoint(repository.s3_endpoint);
+      if (repository.s3_region) setS3Region(repository.s3_region);
+      if (repository.s3_bucket) setS3Bucket(repository.s3_bucket);
+      if (repository.s3_path) setS3Path(repository.s3_path);
 
       // Note: S3 credentials and passphrases are NOT populated for security
       // User must re-enter them if they want to change them
@@ -137,14 +140,14 @@ const EditRepositoryModal: React.FC<EditRepositoryModalProps> = ({
     };
 
     // Add credentials if provided
-    if (repository.repository_type === 'ssh' || repository.repository_type === 'sftp') {
+    if (isSSHFamily) {
       updateData.ssh_auth_method = sshAuthMethod;
       if (sshAuthMethod === 'key' && sshKeyId) {
         updateData.ssh_key_id = sshKeyId;
       } else if (sshAuthMethod === 'password' && sshPassword) {
         updateData.ssh_password = sshPassword;
       }
-    } else if (repository.repository_type === 's3') {
+    } else if (inferredType === 's3') {
       if (s3AccessKey && s3SecretKey) {
         updateData.s3_access_key = s3AccessKey;
         updateData.s3_secret_key = s3SecretKey;
@@ -217,7 +220,7 @@ const EditRepositoryModal: React.FC<EditRepositoryModalProps> = ({
             </label>
             <input
               type="text"
-              value={repository.repository_type || 'local'}
+              value={inferredType}
               disabled
               className="block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm bg-gray-100 text-gray-600 cursor-not-allowed capitalize"
             />
@@ -306,10 +309,23 @@ const EditRepositoryModal: React.FC<EditRepositoryModalProps> = ({
             </label>
           </div>
 
-          {/* SSH/SFTP Credentials - Editable */}
-          {(repository.repository_type === 'ssh' || repository.repository_type === 'sftp') && (
+          {/* SSH/SFTP/Hetzner Credentials - Editable */}
+          {isSSHFamily && (
             <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg">
-              <h4 className="text-sm font-medium text-gray-900 mb-3">SSH/SFTP Credentials</h4>
+              <h4 className="text-sm font-medium text-gray-900 mb-3">
+                {inferredType === 'hetzner' ? 'Hetzner Storage Box Credentials' : 'SSH/SFTP Credentials'}
+              </h4>
+              {repository.ssh_key_id && (
+                <p className="text-xs text-gray-600 mb-3">
+                  Currently using SSH key{' '}
+                  <span className="font-mono">
+                    {(sshKeysData?.data?.ssh_keys || sshKeysData?.ssh_keys || []).find(
+                      (k: any) => String(k.id) === String(repository.ssh_key_id)
+                    )?.name || `#${repository.ssh_key_id}`}
+                  </span>
+                  . Pick a different key below and click <strong>Test Connection</strong> to verify before saving.
+                </p>
+              )}
 
               <div className="mb-3">
                 <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -395,7 +411,7 @@ const EditRepositoryModal: React.FC<EditRepositoryModalProps> = ({
                             'Authorization': `Bearer ${localStorage.getItem('access_token')}`
                           },
                           body: JSON.stringify({
-                            repository_type: repository.repository_type,
+                            repository_type: inferredType,
                             path: sshDetails.path,
                             host: sshDetails.host,
                             port: sshDetails.port,
@@ -412,7 +428,8 @@ const EditRepositoryModal: React.FC<EditRepositoryModalProps> = ({
                           let message = result.data?.message || 'Connection successful';
                           let status: 'success' | 'error' = 'success';
 
-                          if (repository.repository_type === 'ssh' && result.data?.borg_installed === false) {
+                          // For Hetzner the remote borg is bundled, so we don't fail on borg_installed=false.
+                          if (inferredType === 'ssh' && result.data?.borg_installed === false) {
                             status = 'error';
                             message = result.data?.warning || 'Borg is not installed on the remote system';
                             toast.error('Borg is not installed on the remote system.');
@@ -450,13 +467,13 @@ const EditRepositoryModal: React.FC<EditRepositoryModalProps> = ({
 
                   {/* Test result */}
                   {pathTestResult.status !== 'idle' && (
-                    <div className={`mt-2 flex items-center text-sm ${pathTestResult.status === 'success' ? 'text-green-600' :
+                    <div className={`mt-2 flex items-start text-sm ${pathTestResult.status === 'success' ? 'text-green-600' :
                       pathTestResult.status === 'error' ? 'text-red-600' : 'text-blue-600'
                       }`}>
-                      {pathTestResult.status === 'success' && <CheckCircle className="w-4 h-4 mr-1" />}
-                      {pathTestResult.status === 'error' && <AlertCircle className="w-4 h-4 mr-1" />}
-                      {pathTestResult.status === 'testing' && <RefreshCw className="w-4 h-4 mr-1 animate-spin" />}
-                      {pathTestResult.message}
+                      {pathTestResult.status === 'success' && <CheckCircle className="w-4 h-4 mr-1 mt-0.5 flex-shrink-0" />}
+                      {pathTestResult.status === 'error' && <AlertCircle className="w-4 h-4 mr-1 mt-0.5 flex-shrink-0" />}
+                      {pathTestResult.status === 'testing' && <RefreshCw className="w-4 h-4 mr-1 mt-0.5 flex-shrink-0 animate-spin" />}
+                      <span className="whitespace-pre-line break-words">{pathTestResult.message}</span>
                     </div>
                   )}
                 </div>
@@ -465,7 +482,7 @@ const EditRepositoryModal: React.FC<EditRepositoryModalProps> = ({
           )}
 
           {/* S3 Credentials - Editable */}
-          {repository.repository_type === 's3' && (
+          {inferredType === 's3' && (
             <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg">
               <h4 className="text-sm font-medium text-gray-900 mb-3">S3 Credentials</h4>
               <p className="text-xs text-gray-600 mb-3">
@@ -547,18 +564,20 @@ const EditRepositoryModal: React.FC<EditRepositoryModalProps> = ({
               : 'bg-gray-50 border-gray-200'
               }`}>
               <h4 className="text-sm font-medium text-gray-900 mb-3">
-                {repository.encryption === 'unknown' ? 'Set Repository Passphrase' : 'Change Passphrase'}
+                {repository.encryption === 'unknown'
+                  ? 'Set Repository Encryption Passphrase'
+                  : 'Change Repository Encryption Passphrase'}
               </h4>
               <p className="text-xs text-gray-600 mb-3">
                 {repository.encryption === 'unknown'
-                  ? 'This repository may be encrypted. Enter the passphrase to access it.'
-                  : 'Enter a new passphrase to change it. Leave empty to keep current passphrase.'
+                  ? 'This repository is encrypted with Borg. Enter the encryption passphrase so Borgmatic UI can read and write archives.'
+                  : 'This is the passphrase Borg uses to encrypt and decrypt this repository\u2019s archives \u2014 not the SSH key passphrase. Enter a new value to change it, or leave empty to keep the current one.'
                 }
               </p>
 
               <div className="space-y-3">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">New Passphrase</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">New Repository Encryption Passphrase</label>
                   <div className="relative">
                     <input
                       type={showPassphrase ? 'text' : 'password'}
@@ -579,7 +598,7 @@ const EditRepositoryModal: React.FC<EditRepositoryModalProps> = ({
 
                 {passphrase && (
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Confirm Passphrase</label>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Confirm Repository Encryption Passphrase</label>
                     <input
                       type={showPassphrase ? 'text' : 'password'}
                       value={confirmPassphrase}

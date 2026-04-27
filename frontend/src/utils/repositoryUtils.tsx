@@ -96,10 +96,62 @@ export const getSafeDisplayPath = (path: string): string => {
 };
 
 /**
+ * Hetzner Storage Box hostname pattern (e.g. u123456.your-storagebox.de)
+ */
+const HETZNER_HOST_RE = /(^|@)[a-z0-9-]+\.your-storagebox\.de(:|\/|$)/i;
+
+/**
+ * Infer the repository's storage type from `repository_type` when present and
+ * meaningful, falling back to URL-prefix detection on the path.
+ *
+ * This is necessary because legacy / template-imported / discovered repositories
+ * sometimes have `repository_type` missing or set to `'local'` even though the
+ * path is clearly `ssh://...`, `s3:...`, or `rclone:...`. Without inference,
+ * such entries render as "Local" with a `local:ssh://...` path.
+ */
+export const inferRepositoryType = (
+  repository: Pick<Repository, 'repository_type' | 'path'> | null | undefined
+): string => {
+  if (!repository) return 'local';
+
+  const declared = (repository.repository_type || '').toLowerCase();
+  const path = repository.path || '';
+
+  // Sniff what the path actually is.
+  let detected: string | null = null;
+  if (path.startsWith('rclone:')) detected = 'rclone';
+  else if (path.startsWith('s3:')) detected = 's3';
+  else if (path.startsWith('sftp://')) detected = 'sftp';
+  else if (path.startsWith('ssh://') || path.startsWith('local:ssh://')) {
+    detected = HETZNER_HOST_RE.test(path) ? 'hetzner' : 'ssh';
+  }
+
+  // Trust the declared type if it's a known remote type.
+  if (
+    declared === 'rclone' ||
+    declared === 's3' ||
+    declared === 'ssh' ||
+    declared === 'sftp' ||
+    declared === 'hetzner'
+  ) {
+    return declared;
+  }
+
+  // Otherwise, prefer detection from the path.
+  if (detected) return detected;
+
+  // Fall back to the declared type, or 'local' as last resort.
+  return declared || 'local';
+};
+
+/**
  * Format repository path with type prefix for display (masks sensitive credentials)
  */
 export const getDisplayPath = (repository: Repository): string => {
-  const type = repository.repository_type || 'local';
+  const type = inferRepositoryType(repository);
+  // Strip any accidental "local:" prefix that may have been stored historically
+  // for SSH/Hetzner repositories (e.g. "local:ssh://user@host:23/./path").
+  const rawPath = (repository.path || '').replace(/^local:/, '');
 
   switch (type) {
     case 'rclone': {
@@ -110,18 +162,19 @@ export const getDisplayPath = (repository: Repository): string => {
     }
     case 's3': {
       // Mask S3 credentials for security
-      const s3Path = repository.path.startsWith('s3:') ? repository.path : 's3:' + repository.path;
+      const s3Path = rawPath.startsWith('s3:') ? rawPath : 's3:' + rawPath;
       return maskS3Credentials(s3Path);
     }
     case 'ssh':
-      // Path is already in format ssh://user@host:port/path, just return as-is
-      return repository.path.startsWith('ssh://') ? repository.path : `ssh://${repository.path}`;
+    case 'hetzner':
     case 'sftp':
       // Path is already in format ssh://user@host:port/path, just return as-is
-      return repository.path.startsWith('ssh://') ? repository.path : `ssh://${repository.path}`;
+      return rawPath.startsWith('ssh://') || rawPath.startsWith('sftp://')
+        ? rawPath
+        : `ssh://${rawPath}`;
     case 'local':
     default:
-      return `local:${repository.path}`;
+      return `local:${rawPath}`;
   }
 };
 

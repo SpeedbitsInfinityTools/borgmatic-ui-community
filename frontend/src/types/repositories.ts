@@ -32,6 +32,17 @@ export interface Repository {
   // Lock status (detected when querying borg)
   is_locked?: boolean | null;
   lock_error?: string | null;
+  // SSH/SFTP/Hetzner connection metadata (returned by /api/repositories/list)
+  host?: string;
+  port?: number;
+  username?: string;
+  ssh_key_id?: number | string | null;
+  ssh_auth_method?: 'key' | 'password';
+  // S3 metadata (non-sensitive)
+  s3_endpoint?: string;
+  s3_bucket?: string;
+  s3_path?: string;
+  s3_region?: string;
 }
 
 export interface CreateRepositoryForm {
