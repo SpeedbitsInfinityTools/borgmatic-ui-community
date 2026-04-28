@@ -53,6 +53,46 @@ function isLockError(stderr, exitCode) {
     return false;
 }
 
+/**
+ * Decide whether a repository is "remote" (lives over the network) so we can
+ * skip the expensive `borg info`/`borg list` calls when listing repositories.
+ *
+ * Remote repos:
+ *   - SSH/SFTP/Hetzner: path starts with ssh:// or sftp://
+ *   - Rclone (Borg 2.x native): path starts with rclone:
+ *   - S3 (Borg 2.x): path starts with s3:
+ *
+ * We also treat anything with `repository_type` of ssh/sftp/hetzner/rclone/s3
+ * as remote, in case the path representation is unusual.
+ *
+ * For remote repos the bulk listing returns archive_count: null and
+ * total_size: null; the UI shows a "Load Stats" button that calls
+ * /repositories/:id/stats on demand. This prevents hangs when SSH targets
+ * are slow, unreachable, or prompt for a host key/passphrase.
+ *
+ * @param {object} repo
+ * @returns {boolean}
+ */
+function isRemoteRepository(repo) {
+    if (!repo) return false;
+    const declared = (repo.repository_type || '').toLowerCase();
+    if (declared === 'ssh' || declared === 'sftp' || declared === 'hetzner' ||
+        declared === 'rclone' || declared === 's3') {
+        return true;
+    }
+    const p = String(repo.path || '');
+    const looksLikeScpStyle = /^(?:local:)?[^/][^@]*@[^:]+:.+/.test(p);
+    return (
+        p.startsWith('ssh://') ||
+        p.startsWith('sftp://') ||
+        p.startsWith('local:ssh://') ||
+        p.startsWith('local:sftp://') ||
+        p.startsWith('rclone:') ||
+        p.startsWith('s3:') ||
+        looksLikeScpStyle
+    );
+}
+
 router.get('/', authenticateToken, requireAdmin, async (req, res) => {
     try {
         const repositories = await configParser.getAllRepositoriesWithUsage();
@@ -66,7 +106,65 @@ router.get('/', authenticateToken, requireAdmin, async (req, res) => {
             let isLocked = false;
             let lockError = null;
 
-            // Try to get actual encryption from borg info
+            // Skip borg info/list for remote repositories.
+            //
+            // The Repositories page already supports on-demand stats loading
+            // (see "Load Stats" button when archive_count === null), so for
+            // SSH/SFTP/Hetzner/Rclone/S3 repos we return null counts up front.
+            //
+            // Why we skip here:
+            //   1. Each `borg info`/`borg list` over SSH spawns a remote
+            //      `borg serve` process; if the network is slow or the host
+            //      prompts for a host-key/passphrase, the call can hang far
+            //      past the configured timeout.
+            //   2. Even when calls succeed, two round-trips per remote repo
+            //      makes the listing stack to many seconds. Promise.all only
+            //      helps if the slowest repo finishes; one bad target stalls
+            //      the entire page.
+            //   3. Stale `ssh ... borg serve` processes can pile up across
+            //      nodemon restarts and saturate the SSH connection limit.
+            const isRemoteRepo = isRemoteRepository(repo);
+            if (isRemoteRepo) {
+                const repoName = repo.name || repo.label || (repo.isDiscovered ? 'Discovered automatically - not named yet' : `Repository ${index + 1}`);
+                return {
+                    id: repo.id || `repo-legacy-${index + 1}`,
+                    name: repoName,
+                    label: repo.label || repoName,
+                    path: repo.path,
+                    repository_type: repo.repository_type || repo.type || 'local',
+                    storage_mode: repo.storage_mode,
+                    local_path: repo.local_path,
+                    read_only: repo.read_only ?? false,
+                    host: repo.host,
+                    port: repo.port,
+                    username: repo.username,
+                    ssh_key_id: repo.ssh_key_id,
+                    ssh_auth_method: repo.ssh_auth_method,
+                    rclone_remote: repo.rclone_remote,
+                    rclone_path: repo.rclone_path,
+                    s3_endpoint: repo.s3_endpoint,
+                    s3_bucket: repo.s3_bucket,
+                    s3_path: repo.s3_path,
+                    s3_region: repo.s3_region,
+                    encryption: actualEncryption,
+                    compression: repo.compression || 'lz4',
+                    borg_version: repo.borg_version || '1.x',
+                    hetzner_borg_version: repo.hetzner_borg_version,
+                    last_backup: null,
+                    total_size: null,
+                    archive_count: null, // <- triggers "Load Stats" button in UI
+                    is_active: repo.is_active || false,
+                    isUsed: repo.isUsed,
+                    usedInBackups: repo.usedInBackups,
+                    created_at: repo.created_at || new Date().toISOString(),
+                    updated_at: null,
+                    isDiscovered: repo.isDiscovered || false,
+                    is_locked: null,
+                    lock_error: null
+                };
+            }
+
+            // Try to get actual encryption from borg info (LOCAL repos only)
             try {
                 console.log(`🔍 [Repos] Getting borg info for: ${repo.path}`);
 
@@ -93,10 +191,9 @@ router.get('/', authenticateToken, requireAdmin, async (req, res) => {
                 const { execa } = require('execa');
                 // Use version-appropriate command
                 const borgVersion = repo.borg_version || '1.x'; // Default to 1.x for existing repos
-                
-                // Detect if this is a remote (SSH) repository - needs longer timeout
-                const isRemoteRepo = repo.path.includes('ssh://') || repo.path.includes('@');
-                const timeout = isRemoteRepo ? 30000 : 10000; // 30s for remote, 10s for local
+
+                // Local repos: short timeout (we already returned early for remotes)
+                const timeout = 10000;
                 
                 // Use --lock-wait=1 to fail quickly if there's a lock
                 const { command, args } = getBorgCommand(borgVersion, 'info', {
@@ -196,7 +293,7 @@ router.get('/', authenticateToken, requireAdmin, async (req, res) => {
                         });
                         const listResult = await execa(listCmd.command, listCmd.args, {
                             env,
-                            timeout: isRemoteRepo ? 30000 : 15000,
+                            timeout: 15000, // local-only path; remote repos returned early
                             reject: false
                         });
                         
