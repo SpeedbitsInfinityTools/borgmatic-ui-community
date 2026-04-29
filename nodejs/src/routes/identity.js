@@ -4,6 +4,7 @@ const { authenticateToken, requireAdmin } = require('../middleware/auth');
 const identityManager = require('../services/identity-manager');
 const fs = require('fs-extra');
 const path = require('path');
+const os = require('os');
 const config = require('../config');
 
 const { getEditionInfo, isFeatureAvailable } = require('../utils/edition');
@@ -169,6 +170,17 @@ router.get('/status', authenticateToken, requireAdmin, async (req, res) => {
         const currentMode = status.mode || 'standalone';
         const modePaths = config.getModeBasedPaths(currentMode);
 
+        // Surface the system hostname so the frontend can fall back to it
+        // as the default "Instance name" when the user hasn't customized one.
+        // os.hostname() returns the Linux/Windows host short name (e.g.
+        // "MrwSurface7") which is meaningful for distinguishing installs.
+        let systemHostname = '';
+        try {
+            systemHostname = (os.hostname() || '').trim();
+        } catch (_) {
+            systemHostname = '';
+        }
+
         res.json({
             success: true,
             data: {
@@ -176,6 +188,7 @@ router.get('/status', authenticateToken, requireAdmin, async (req, res) => {
                 edition: editionInfo.edition,
                 features: editionInfo.features,
                 available_modes: editionInfo.features,
+                system_hostname: systemHostname,
                 paths: {
                     config: modePaths.configDir,
                     data: modePaths.dataDir,
@@ -437,6 +450,60 @@ router.put('/client-config', authenticateToken, requireAdmin, async (req, res) =
         res.status(500).json({
             success: false,
             detail: 'Failed to update client configuration'
+        });
+    }
+});
+
+/**
+ * Update the human-readable instance/display name.
+ *
+ * This is a mode-agnostic endpoint that lets the user label this Borgmatic UI
+ * installation (e.g. "WSL Laptop", "Production Server") so multiple instances
+ * can be told apart in the UI. It writes to identity.client_name, which the
+ * /identity/status response already exposes as the unified display name
+ * (with director_name as a fallback for director mode).
+ *
+ * Body: { client_name: string }   // empty string clears the override
+ * Works in standalone, client, and director modes.
+ *
+ * Note: PUT /client-config is a separate, client-mode-only endpoint that
+ * additionally requires connection_token and director_url; we intentionally
+ * do not collapse the two so that Settings > Client Configuration keeps its
+ * stricter validation.
+ */
+router.put('/display-name', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        let { client_name } = req.body || {};
+        if (typeof client_name !== 'string') {
+            return res.status(400).json({
+                success: false,
+                detail: 'client_name must be a string'
+            });
+        }
+        client_name = client_name.trim();
+        if (client_name.length > 80) {
+            return res.status(400).json({
+                success: false,
+                detail: 'client_name must be 80 characters or fewer'
+            });
+        }
+
+        const identity = await identityManager.updateIdentity({ client_name });
+
+        res.json({
+            success: true,
+            data: {
+                identity,
+                message: client_name
+                    ? 'Instance name updated'
+                    : 'Instance name cleared'
+            }
+        });
+    } catch (error) {
+        console.error('Error updating display name:', error.message);
+        res.status(500).json({
+            success: false,
+            detail: 'Failed to update instance name'
         });
     }
 });

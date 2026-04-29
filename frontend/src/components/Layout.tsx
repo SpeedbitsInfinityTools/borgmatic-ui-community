@@ -31,6 +31,7 @@ import {
   HelpCircle,
   Code,
   AlertCircle,
+  Pencil,
 } from 'lucide-react'
 
 const navigation = [
@@ -62,6 +63,8 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   const [showCurrentPassword, setShowCurrentPassword] = useState(false)
   const [showNewPassword, setShowNewPassword] = useState(false)
   const [showConfirmPassword, setShowConfirmPassword] = useState(false)
+  const [showInstanceNameModal, setShowInstanceNameModal] = useState(false)
+  const [instanceNameInput, setInstanceNameInput] = useState('')
 
   const location = useLocation()
   const { user, logout } = useAuth()
@@ -237,6 +240,40 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     },
   });
 
+  const updateDisplayNameMutation = useMutation({
+    mutationFn: (client_name: string) =>
+      identityAPI.updateDisplayName({ client_name }),
+    onSuccess: () => {
+      const trimmed = instanceNameInput.trim();
+      toast.success(
+        trimmed
+          ? 'Instance name saved'
+          : (systemHostname ? `Instance name reset to hostname (${systemHostname})` : 'Instance name cleared')
+      );
+      setShowInstanceNameModal(false);
+      queryClient.invalidateQueries('identityStatus');
+    },
+    onError: (error: any) => {
+      toast.error(error.response?.data?.detail || 'Failed to save instance name');
+    },
+  });
+
+  const openInstanceNameModal = () => {
+    setInstanceNameInput((identity?.client_name || '').toString());
+    setShowInstanceNameModal(true);
+  };
+
+  const handleInstanceNameSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    updateDisplayNameMutation.mutate(instanceNameInput.trim().slice(0, 80));
+  };
+
+  const systemHostname = (statusData?.data?.data?.system_hostname || '').toString().trim();
+  const storedInstanceName = (identity?.client_name || '').toString().trim();
+  // Default to the OS hostname when the user hasn't set a custom instance name.
+  // This way the chip is meaningful out of the box on every install.
+  const instanceName = storedInstanceName || systemHostname;
+
   const handlePasswordChange = (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -271,7 +308,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
               <Menu className="h-6 w-6" />
             </button>
             <img src={logo} alt="Speedbits Logo" className="h-12 w-auto" />
-            <span className="text-base font-bold text-black" style={{ marginTop: '-5px', marginLeft: '-10px' }}>Borgmatic Director UI</span>
+            <span className="text-base font-bold text-black" style={{ marginTop: '-5px', marginLeft: '-10px' }}>Borgmatic UI</span>
           </div>
 
           {/* Center: Remote Session Indicator */}
@@ -317,7 +354,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           <div className="flex h-16 items-center justify-between px-4 border-b border-gray-200">
             <div className="flex items-center">
               <img src={logo} alt="Speedbits Logo" className="h-10 w-auto" />
-              <span className="text-sm font-bold text-black" style={{ marginTop: '-5px', marginLeft: '-10px' }}>Borgmatic Director UI</span>
+              <span className="text-sm font-bold text-black" style={{ marginTop: '-5px', marginLeft: '-10px' }}>Borgmatic UI</span>
             </div>
             <button
               onClick={() => setSidebarOpen(false)}
@@ -326,9 +363,32 @@ export default function Layout({ children }: { children: React.ReactNode }) {
               <X className="h-6 w-6" />
             </button>
           </div>
+          {/* Instance Name Chip (shown when client_name or hostname is available) */}
+          {instanceName && (
+            <div className="mx-4 mt-3 mb-1">
+              <div
+                className="w-full pl-3 pr-2 py-2 bg-white border border-gray-200 border-l-4 border-l-blue-500 rounded-lg shadow-sm flex items-center justify-between gap-2"
+                title={instanceName}
+              >
+                <div className="flex flex-col min-w-0 flex-1">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-blue-600 leading-tight">Instance:</span>
+                  <span className="text-sm font-bold text-gray-900 whitespace-normal break-words line-clamp-2 leading-snug">{instanceName}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => { setSidebarOpen(false); openInstanceNameModal(); }}
+                  className="flex-shrink-0 p-1.5 -mr-1 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors"
+                  title={`Edit instance name (${instanceName})`}
+                  aria-label="Edit instance name"
+                >
+                  <Pencil className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            </div>
+          )}
           {/* Mode Indicator Badge */}
           {isRemoteSession && selectedClient ? (
-            <div className="mx-4 mt-3 mb-2">
+            <div className={`mx-4 ${instanceName ? 'mt-1' : 'mt-3'} mb-2`}>
               <div className="flex flex-col items-center px-3 py-2 bg-blue-100 border-2 border-blue-500 rounded-lg">
                 <div className="flex items-center space-x-2">
                   <Server className="h-4 w-4 text-blue-700" />
@@ -340,21 +400,21 @@ export default function Layout({ children }: { children: React.ReactNode }) {
               </div>
             </div>
           ) : isDirectorMode ? (
-            <div className="mx-4 mt-3 mb-2">
+            <div className={`mx-4 ${instanceName ? 'mt-1' : 'mt-3'} mb-2`}>
               <div className="flex items-center space-x-2 px-3 py-2 bg-purple-100 border border-purple-300 rounded-lg">
                 <Server className="h-4 w-4 text-purple-700" />
                 <span className="text-xs font-semibold text-purple-900">Director Mode</span>
               </div>
             </div>
           ) : isStandaloneMode ? (
-            <div className="mx-4 mt-3 mb-2">
+            <div className={`mx-4 ${instanceName ? 'mt-1' : 'mt-3'} mb-2`}>
               <div className="flex items-center space-x-2 px-3 py-2 bg-green-50 border border-green-300 rounded-lg">
                 <Server className="h-4 w-4 text-green-700" />
                 <span className="text-xs font-semibold text-green-900">Standalone Mode</span>
               </div>
             </div>
           ) : isClientMode ? (
-            <div className="mx-4 mt-3 mb-2">
+            <div className={`mx-4 ${instanceName ? 'mt-1' : 'mt-3'} mb-2`}>
               <div className="flex flex-col items-center px-3 py-2 bg-blue-50 border border-blue-300 rounded-lg">
                 <div className="flex items-center space-x-2">
                   <Server className="h-4 w-4 text-blue-700" />
@@ -448,9 +508,32 @@ export default function Layout({ children }: { children: React.ReactNode }) {
       {/* Desktop sidebar - Below header */}
       <div className="hidden lg:fixed lg:inset-y-0 lg:top-16 lg:flex lg:w-64 lg:flex-col">
         <div className="flex flex-col flex-grow bg-white border-r border-gray-200">
+          {/* Instance Name Chip (shown when client_name or hostname is available) */}
+          {instanceName && (
+            <div className="mx-4 mt-4 mb-1">
+              <div
+                className="w-full pl-3 pr-2 py-2 bg-white border border-gray-200 border-l-4 border-l-blue-500 rounded-lg shadow-sm flex items-center justify-between gap-2"
+                title={instanceName}
+              >
+                <div className="flex flex-col min-w-0 flex-1">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-blue-600 leading-tight">Instance:</span>
+                  <span className="text-sm font-bold text-gray-900 whitespace-normal break-words line-clamp-2 leading-snug">{instanceName}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={openInstanceNameModal}
+                  className="flex-shrink-0 p-1.5 -mr-1 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors"
+                  title={`Edit instance name (${instanceName})`}
+                  aria-label="Edit instance name"
+                >
+                  <Pencil className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            </div>
+          )}
           {/* Mode Indicator Badge */}
           {isRemoteSession && selectedClient ? (
-            <div className="mx-4 mt-4 mb-2">
+            <div className={`mx-4 ${instanceName ? 'mt-1' : 'mt-4'} mb-2`}>
               <div className="flex flex-col items-center px-3 py-2 bg-blue-100 border-2 border-blue-500 rounded-lg">
                 <div className="flex items-center space-x-2">
                   <Server className="h-4 w-4 text-blue-700" />
@@ -462,21 +545,21 @@ export default function Layout({ children }: { children: React.ReactNode }) {
               </div>
             </div>
           ) : isDirectorMode ? (
-            <div className="mx-4 mt-4 mb-2">
+            <div className={`mx-4 ${instanceName ? 'mt-1' : 'mt-4'} mb-2`}>
               <div className="flex items-center space-x-2 px-3 py-2 bg-purple-100 border border-purple-300 rounded-lg">
                 <Server className="h-4 w-4 text-purple-700" />
                 <span className="text-xs font-semibold text-purple-900">Director Mode</span>
               </div>
             </div>
           ) : isStandaloneMode ? (
-            <div className="mx-4 mt-4 mb-2">
+            <div className={`mx-4 ${instanceName ? 'mt-1' : 'mt-4'} mb-2`}>
               <div className="flex items-center space-x-2 px-3 py-2 bg-green-50 border border-green-300 rounded-lg">
                 <Server className="h-4 w-4 text-green-700" />
                 <span className="text-xs font-semibold text-green-900">Standalone Mode</span>
               </div>
             </div>
           ) : isClientMode ? (
-            <div className="mx-4 mt-4 mb-2">
+            <div className={`mx-4 ${instanceName ? 'mt-1' : 'mt-4'} mb-2`}>
               <div className="flex flex-col items-center px-3 py-2 bg-blue-50 border border-blue-300 rounded-lg">
                 <div className="flex items-center space-x-2">
                   <Server className="h-4 w-4 text-blue-700" />
@@ -677,6 +760,62 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                     className="px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50"
                   >
                     {changePasswordMutation.isLoading ? 'Changing...' : 'Change Password'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Instance Name Edit Modal */}
+      {showInstanceNameModal && (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+          <div className="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
+            <div className="mt-3">
+              <h3 className="text-lg font-medium text-gray-900 mb-1">Set Instance Name</h3>
+              <p className="text-xs text-gray-500 mb-4">
+                A short label to distinguish this Borgmatic UI installation from others. Shown in the left sidebar.
+                {systemHostname
+                  ? ` Leave empty to use the system hostname (${systemHostname}) as the default.`
+                  : ' Leave empty to clear.'}
+              </p>
+              <form onSubmit={handleInstanceNameSubmit} className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Instance name</label>
+                  <input
+                    type="text"
+                    value={instanceNameInput}
+                    onChange={(e) => setInstanceNameInput(e.target.value)}
+                    maxLength={80}
+                    placeholder={systemHostname || 'e.g. WSL Laptop, Production Server, Backup Box A'}
+                    className="block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                    autoFocus
+                  />
+                  <p className="mt-1 text-xs text-gray-400">
+                    {instanceNameInput.length}/80 characters
+                    {systemHostname && !instanceNameInput.trim() && (
+                      <span className="ml-2 text-gray-500">
+                        — defaulting to <span className="font-medium">{systemHostname}</span>
+                      </span>
+                    )}
+                  </p>
+                </div>
+
+                <div className="flex justify-end space-x-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowInstanceNameModal(false)}
+                    className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={updateDisplayNameMutation.isLoading}
+                    className="px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50"
+                  >
+                    {updateDisplayNameMutation.isLoading ? 'Saving...' : 'Save'}
                   </button>
                 </div>
               </form>

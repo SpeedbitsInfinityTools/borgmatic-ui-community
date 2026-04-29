@@ -227,6 +227,7 @@ export const identityAPI = {
   updateDirectorPort: (port: number) => api.put('/identity/director-port', { port }),
   updateDirectorToken: (connection_token: string) => api.put('/identity/director-token', { connection_token }),
   updateClientConfig: (config: any) => api.put('/identity/client-config', config),
+  updateDisplayName: (body: { client_name: string }) => api.put('/identity/display-name', body),
   regenerateKeys: () => api.post('/identity/regenerate-keys'),
   testConnection: (config?: { director_url?: string; connection_token?: string }) =>
     api.post('/identity/test-connection', config || {}),

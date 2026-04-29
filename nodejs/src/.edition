@@ -7,6 +7,6 @@
   "director_available": false,
   "upgrade_url": "https://www.speedbits.io",
   "build_type": "single-image",
-  "prepared_at": "2026-04-28T05:55:00.434Z",
+  "prepared_at": "2026-04-29T09:02:39.268Z",
   "note": "Commercial edition activated at runtime if /app/commercial/ contains injected files"
 }
