@@ -169,6 +169,10 @@ export function useBackupWizard({ onClose, onSuccess, editBackup, mode = 'produc
     error: null,
   });
   const [testingDbConnectionIndex, setTestingDbConnectionIndex] = useState<number | null>(null);
+  // Full failure text from the most recent test-connection attempt, keyed by source index.
+  // Stored separately from the toast so we can render the (potentially long, multi-line)
+  // server error inline below the row instead of letting it spill out of a top-anchored toast.
+  const [dbConnectionTestErrors, setDbConnectionTestErrors] = useState<Record<number, string>>({});
   const [mssqlToolCheck, setMssqlToolCheck] = useState<{ checked: boolean; ok: boolean; errors: string[] }>({ checked: false, ok: true, errors: [] });
   const [awsToolCheck, setAwsToolCheck] = useState<{ checked: boolean; ok: boolean; errors: string[] }>({ checked: false, ok: true, errors: [] });
   const [commercialFeatures, setCommercialFeatures] = useState<string[]>([]);
@@ -684,6 +688,30 @@ export function useBackupWizard({ onClose, onSuccess, editBackup, mode = 'produc
     }
   };
 
+  // Some DB drivers (notably mssql / FreeTDS) emit the same error line multiple times
+  // (e.g. once per login retry). Collapse identical adjacent or repeated lines so the
+  // inline error stays compact and copy-friendly.
+  const dedupeErrorMessage = (raw: string): string => {
+    if (!raw) return raw;
+    const lines = raw.split(/\r?\n/).map(l => l.trimEnd());
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const line of lines) {
+      const key = line.trim();
+      if (key && seen.has(key)) continue;
+      if (key) seen.add(key);
+      out.push(line);
+    }
+    return out.join('\n').trim();
+  };
+
+  // Produce a short one-line summary for use in toasts, where vertical space is limited.
+  const summarizeError = (msg: string, max: number = 140): string => {
+    if (!msg) return '';
+    const oneLine = msg.replace(/\s+/g, ' ').trim();
+    return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
+  };
+
   const testDatabaseConnection = async (sourceIndex: number) => {
     const source = formData.sources[sourceIndex];
     if (!source || source.type !== 'mssql') { toast.error('Test connection is currently available for MSSQL only'); return; }
@@ -692,6 +720,11 @@ export function useBackupWizard({ onClose, onSuccess, editBackup, mode = 'produc
       return;
     }
     setTestingDbConnectionIndex(sourceIndex);
+    setDbConnectionTestErrors(prev => {
+      const next = { ...prev };
+      delete next[sourceIndex];
+      return next;
+    });
     try {
       const response = await databaseDiscoveryAPI.testConnection({
         type: source.type, hostname: source.hostname || 'localhost',
@@ -709,10 +742,22 @@ export function useBackupWizard({ onClose, onSuccess, editBackup, mode = 'produc
       }
     } catch (error: any) {
       const baseError = error.response?.data?.detail || error.message || 'Failed to connect to MSSQL server';
-      toast.error(`${baseError} ${getMssqlAuthHint(source)}`);
+      const fullError = dedupeErrorMessage(`${baseError}\n\n${getMssqlAuthHint(source)}`);
+      setDbConnectionTestErrors(prev => ({ ...prev, [sourceIndex]: fullError }));
+      // Short toast — full details are shown inline beneath the source row to avoid
+      // a long toast getting clipped at the top of the viewport.
+      toast.error(`MSSQL connection failed — ${summarizeError(baseError, 90)}`);
     } finally {
       setTestingDbConnectionIndex(null);
     }
+  };
+
+  const dismissDbConnectionTestError = (sourceIndex: number) => {
+    setDbConnectionTestErrors(prev => {
+      const next = { ...prev };
+      delete next[sourceIndex];
+      return next;
+    });
   };
 
   const selectDatabaseFromBrowser = (dbName: string) => {
@@ -865,6 +910,7 @@ export function useBackupWizard({ onClose, onSuccess, editBackup, mode = 'produc
     customRetention, setCustomRetention,
     dbBrowserState, setDbBrowserState,
     testingDbConnectionIndex,
+    dbConnectionTestErrors, dismissDbConnectionTestError,
     mssqlToolCheck, awsToolCheck,
     checkMssqlTools, checkAwsTools,
     commercialFeatures,

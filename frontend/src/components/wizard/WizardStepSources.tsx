@@ -40,6 +40,8 @@ export interface WizardStepSourcesProps {
   browseDatabases: (index: number) => void;
   testDatabaseConnection: (index: number) => void;
   testingDbConnectionIndex: number | null;
+  dbConnectionTestErrors: Record<number, string>;
+  dismissDbConnectionTestError: (index: number) => void;
 
   openDiscoveryOptions: () => void;
   isDiscovering: boolean;
@@ -88,6 +90,8 @@ const WizardStepSources: React.FC<WizardStepSourcesProps> = (props) => {
     browseDatabases,
     testDatabaseConnection,
     testingDbConnectionIndex,
+    dbConnectionTestErrors,
+    dismissDbConnectionTestError,
     openDiscoveryOptions,
     isDiscovering,
     checkMssqlTools,
@@ -383,6 +387,8 @@ const WizardStepSources: React.FC<WizardStepSourcesProps> = (props) => {
                   browseDatabases={browseDatabases}
                   testDatabaseConnection={testDatabaseConnection}
                   testingDbConnectionIndex={testingDbConnectionIndex}
+                  dbConnectionTestErrors={dbConnectionTestErrors}
+                  dismissDbConnectionTestError={dismissDbConnectionTestError}
                   checkMssqlTools={checkMssqlTools}
                   checkAwsTools={checkAwsTools}
                   mssqlToolCheck={mssqlToolCheck}
@@ -523,6 +529,8 @@ interface DatabaseSourceCardProps {
   browseDatabases: (index: number) => void;
   testDatabaseConnection: (index: number) => void;
   testingDbConnectionIndex: number | null;
+  dbConnectionTestErrors: Record<number, string>;
+  dismissDbConnectionTestError: (index: number) => void;
   checkMssqlTools: () => void;
   checkAwsTools: () => void;
   mssqlToolCheck: { checked: boolean; ok: boolean; errors: string[] };
@@ -533,6 +541,7 @@ interface DatabaseSourceCardProps {
 const DatabaseSourceCard: React.FC<DatabaseSourceCardProps> = ({
   source, index, updateSource, trimSourceField, removeSource, getDefaultPort,
   getMssqlAuthHint, browseDatabases, testDatabaseConnection, testingDbConnectionIndex,
+  dbConnectionTestErrors, dismissDbConnectionTestError,
   checkMssqlTools, checkAwsTools, mssqlToolCheck, awsToolCheck, commercialFeatures,
 }) => {
   const hasFeature = (f: string) => commercialFeatures.includes(f);
@@ -820,6 +829,36 @@ const DatabaseSourceCard: React.FC<DatabaseSourceCardProps> = ({
             <span className="text-xs text-blue-600 bg-blue-50 px-2 py-0.5 rounded" title="Connects over network (docker network for containers, or normal network for remote hosts). Dumps run inside the borgmatic container.">🔗 network</span>
           )}
         </div>
+        {dbConnectionTestErrors[index] && (
+          <div className="ml-7 mt-2 rounded-lg border border-red-200 bg-red-50">
+            <div className="flex items-start gap-2 px-3 py-2 border-b border-red-200">
+              <span className="text-red-600 text-xs font-semibold uppercase tracking-wide flex-1">Connection test failed</span>
+              <button
+                type="button"
+                onClick={() => {
+                  navigator.clipboard?.writeText(dbConnectionTestErrors[index]).then(
+                    () => { /* clipboard ok */ },
+                    () => { /* clipboard not available */ }
+                  );
+                }}
+                className="text-[11px] font-medium text-red-700 hover:text-red-900 hover:underline"
+                title="Copy error to clipboard"
+              >
+                Copy
+              </button>
+              <button
+                type="button"
+                onClick={() => dismissDbConnectionTestError(index)}
+                className="text-red-500 hover:text-red-700"
+                title="Dismiss"
+                aria-label="Dismiss connection error"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <pre className="px-3 py-2 max-h-48 overflow-auto text-xs text-red-900 whitespace-pre-wrap break-words font-mono leading-relaxed">{dbConnectionTestErrors[index]}</pre>
+          </div>
+        )}
       </div>
     </div>
   );

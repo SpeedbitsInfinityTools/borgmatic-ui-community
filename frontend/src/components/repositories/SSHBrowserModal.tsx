@@ -52,6 +52,10 @@ const SSHBrowserModal: React.FC<SSHBrowserModalProps> = ({
   const [loading, setLoading] = useState(false);
   // Always start browsing from root "/" - currentPath is the value to return, not where to start
   const [browsePath, setBrowsePath] = useState<string>('/');
+  // For SFTP-only chrooted servers (e.g. Hetzner Storage Box) the user's effective
+  // top-level directory is their home, not "/" — the backend reports it via pwd.
+  // When set, we treat it as the visual root for breadcrumbs and the Home button.
+  const [homePath, setHomePath] = useState<string>('');
   const [items, setItems] = useState<BrowseItem[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [showNewFolderInput, setShowNewFolderInput] = useState(false);
@@ -68,6 +72,7 @@ const SSHBrowserModal: React.FC<SSHBrowserModalProps> = ({
   useEffect(() => {
     if (isOpen) {
       setBrowsePath('/');
+      setHomePath('');
       setItems([]);
       setError(null);
       setSelectedPath(null);
@@ -113,6 +118,9 @@ const SSHBrowserModal: React.FC<SSHBrowserModalProps> = ({
         setItems(response.data.data.items || []);
         setBrowsePath(response.data.data.currentPath || '/');
         setSelectedPath(null);
+        if (response.data.data.homePath) {
+          setHomePath(response.data.data.homePath);
+        }
         // Show note if server is SFTP-only
         if (response.data.data.mode === 'sftp') {
           setSftpModeNote(response.data.data.note || 'Using SFTP mode');
@@ -199,14 +207,40 @@ const SSHBrowserModal: React.FC<SSHBrowserModalProps> = ({
     setSearchFilter('');
   };
 
+  // The visual "root" of navigation. For SFTP-chrooted servers this is the user's
+  // home (returned by the backend); otherwise it's the filesystem root.
+  const effectiveRoot = homePath || '/';
+  const atEffectiveRoot = browsePath === effectiveRoot || browsePath === '/' || (homePath && browsePath === homePath);
+
   const navigateUp = () => {
-    if (browsePath === '/') return;
+    if (atEffectiveRoot) return;
     const parts = browsePath.split('/').filter(Boolean);
     parts.pop();
-    navigateTo('/' + parts.join('/') || '/');
+    const parent = '/' + parts.join('/');
+    // Don't allow stepping above the effective root (would 404 on chrooted servers).
+    if (homePath && !parent.startsWith(homePath)) {
+      navigateTo(homePath);
+    } else {
+      navigateTo(parent === '/' ? '/' : parent);
+    }
   };
 
   const buildBreadcrumbs = () => {
+    // When a homePath is known and the user is browsing within it, hide the
+    // segments above home and show the home as "Root". Clicking "Root" then jumps
+    // back to the user's effective top — not to "/", which often 404s on chroots.
+    if (homePath && browsePath.startsWith(homePath)) {
+      const breadcrumbs = [{ name: 'Root', path: homePath }];
+      const tail = browsePath.substring(homePath.length).replace(/^\/+/, '');
+      if (tail) {
+        let acc = homePath.replace(/\/$/, '');
+        for (const part of tail.split('/').filter(Boolean)) {
+          acc += '/' + part;
+          breadcrumbs.push({ name: part, path: acc });
+        }
+      }
+      return breadcrumbs;
+    }
     const parts = browsePath.split('/').filter(Boolean);
     const breadcrumbs = [{ name: 'Root', path: '/' }];
     let accPath = '';
@@ -286,15 +320,15 @@ const SSHBrowserModal: React.FC<SSHBrowserModalProps> = ({
           {/* Navigation buttons */}
           <div className="flex items-center space-x-2">
             <button
-              onClick={() => navigateTo('/')}
+              onClick={() => navigateTo(effectiveRoot)}
               className="p-1.5 text-gray-600 hover:text-gray-900 hover:bg-gray-200 rounded"
-              title="Go to root"
+              title={homePath ? `Go to home (${homePath})` : 'Go to root'}
             >
               <Home className="w-4 h-4" />
             </button>
             <button
               onClick={navigateUp}
-              disabled={browsePath === '/'}
+              disabled={atEffectiveRoot}
               className="p-1.5 text-gray-600 hover:text-gray-900 hover:bg-gray-200 rounded disabled:opacity-50 disabled:cursor-not-allowed"
               title="Go up"
             >

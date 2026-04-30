@@ -587,7 +587,20 @@ function parseSftpListing(output, targetPath) {
             // Handle symlinks (name -> target)
             let displayName = name;
             if (isLink && name.includes(' -> ')) {
-                displayName = name.split(' -> ')[0];
+                displayName = name.split(' -> ')[0].trim();
+            }
+
+            // Some SFTP servers (notably Hetzner Storage Box) print the absolute path
+            // in the name column when listing an absolute directory. Reduce to basename
+            // so the UI shows just the folder/file name and so we can build child paths
+            // correctly.
+            const lastSlash = displayName.lastIndexOf('/');
+            if (lastSlash !== -1) {
+                displayName = displayName.substring(lastSlash + 1);
+            }
+            displayName = displayName.trim();
+            if (!displayName || displayName === '.' || displayName === '..') {
+                continue;
             }
 
             // Build full path - handle root path properly
@@ -692,20 +705,30 @@ async function browseSftp(host, port, username, authMethod, sshKey, ssh_password
             throw new Error(errorMsg);
         }
 
-        // Parse actual path from pwd output
-        let realPath = targetPath;
+        // Parse actual path from pwd output. On chrooted SFTP (Hetzner Storage Box),
+        // pwd returns the user's effective home directory, which is the highest path
+        // they can navigate to.
+        let homePath = null;
         const pwdMatch = result.stdout.match(/Remote working directory:\s*(.+)/);
         if (pwdMatch) {
-            realPath = pwdMatch[1].trim();
-            console.log('📂 [ssh-browse] Actual remote path:', realPath);
+            homePath = pwdMatch[1].trim();
+            console.log('📂 [ssh-browse] Reported home/working directory:', homePath);
         }
 
-        const items = parseSftpListing(result.stdout, realPath || targetPath);
+        // Determine the absolute base path that the listed entries belong to. Use
+        // homePath only when the request was for the synthetic root ('/' or '.').
+        // Otherwise the user is navigating an explicit absolute path and we must
+        // build child paths from it (NOT from pwd, which never changes).
+        const isRootRequest = !targetPath || targetPath === '/' || targetPath === '.';
+        const basePath = isRootRequest ? (homePath || '/') : targetPath;
+
+        const items = parseSftpListing(result.stdout, basePath);
 
         return {
             success: true,
             items,
-            currentPath: targetPath,
+            currentPath: basePath,
+            homePath,
             mode: 'sftp'
         };
     } catch (error) {
@@ -820,6 +843,7 @@ router.post('/ssh-browse', authenticateToken, requireAdmin, async (req, res) => 
                         data: {
                             items: sftpResult.items,
                             currentPath: sftpResult.currentPath,
+                            homePath: sftpResult.homePath || null,
                             mode: 'sftp'
                         }
                     });
@@ -925,6 +949,7 @@ router.post('/ssh-browse', authenticateToken, requireAdmin, async (req, res) => 
                             data: {
                                 items: sftpResult.items,
                                 currentPath: sftpResult.currentPath,
+                                homePath: sftpResult.homePath || null,
                                 mode: 'sftp',
                                 note: 'This server only allows SFTP connections (no SSH shell)'
                             }

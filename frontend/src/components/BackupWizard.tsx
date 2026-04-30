@@ -188,6 +188,8 @@ const BackupWizard: React.FC<BackupWizardProps> = ({
               getDefaultPort={w.getDefaultPort} getMssqlAuthHint={w.getMssqlAuthHint}
               browseDatabases={w.browseDatabases} testDatabaseConnection={w.testDatabaseConnection}
               testingDbConnectionIndex={w.testingDbConnectionIndex}
+              dbConnectionTestErrors={w.dbConnectionTestErrors}
+              dismissDbConnectionTestError={w.dismissDbConnectionTestError}
               openDiscoveryOptions={w.openDiscoveryOptions} isDiscovering={w.isDiscovering}
               checkMssqlTools={w.checkMssqlTools} checkAwsTools={w.checkAwsTools}
               mssqlToolCheck={w.mssqlToolCheck} awsToolCheck={w.awsToolCheck}
