@@ -32,6 +32,11 @@ import {
   Code,
   AlertCircle,
   Pencil,
+  Wifi,
+  WifiOff,
+  Loader2,
+  XCircle,
+  Users,
 } from 'lucide-react'
 
 const navigation = [
@@ -42,6 +47,7 @@ const navigation = [
   { name: 'Schedules', href: '/schedules', icon: Clock, modes: ['standalone', 'client'] },
   { name: 'SSH Keys', href: '/ssh-keys', icon: Key, modes: ['standalone', 'client', 'director'] },
   { name: 'Templates', href: '/templates', icon: LayoutIcon, modes: ['standalone', 'director'] },
+  { name: 'Clients', href: '/clients', icon: Users, modes: ['director'] },
   { name: 'Deployments', href: '/deployments', icon: Send, modes: ['director'] },
   { name: 'Logs', href: '/logs', icon: Activity, modes: ['standalone', 'client', 'director'] },
   { name: 'Logs Overview', href: '/logs-overview', icon: Activity, modes: ['director'] }, // Director-only: aggregated client logs
@@ -68,7 +74,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
 
   const location = useLocation()
   const { user, logout } = useAuth()
-  const { isRemoteSession, selectedClient } = useDirector()
+  const { isRemoteSession, selectedClient, selectedConnectionQuality, disconnectFromRemote } = useDirector()
   const queryClient = useQueryClient()
 
   // Fetch current mode for visual indicator
@@ -206,7 +212,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
         }
         break
     }
-  }, [lastEvent])
+  }, [lastEvent, queryClient])
 
   const mode = statusData?.data?.data?.mode || 'standalone'
   const identity = statusData?.data?.data?.identity
@@ -313,22 +319,63 @@ export default function Layout({ children }: { children: React.ReactNode }) {
 
           {/* Center: Remote Session Indicator */}
           <div className="flex-1 flex justify-center px-4">
-            {isRemoteSession && selectedClient && (
-              <div className="flex items-center px-4 py-2 bg-gradient-to-r from-blue-100 to-indigo-100 border-2 border-blue-600 rounded-lg shadow-md">
-                <div className="flex items-center space-x-2">
-                  <div className="relative flex h-3 w-3">
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
-                    <span className="relative inline-flex rounded-full h-3 w-3 bg-blue-600"></span>
+            {isRemoteSession && selectedClient && (() => {
+              // Quality-aware styling: stays calm when healthy, draws the eye when not.
+              const q = selectedConnectionQuality
+              const isReconnecting = q === 'reconnecting'
+              const isLost = q === 'lost'
+
+              const containerCls = isLost
+                ? 'border-2 border-red-600 bg-gradient-to-r from-red-100 to-rose-100'
+                : isReconnecting
+                  ? 'border-2 border-amber-500 bg-gradient-to-r from-amber-100 to-yellow-100'
+                  : 'border-2 border-blue-600 bg-gradient-to-r from-blue-100 to-indigo-100'
+              const textCls = isLost ? 'text-red-900' : isReconnecting ? 'text-amber-900' : 'text-blue-900'
+              const subTextCls = isLost ? 'text-red-700 bg-red-50' : isReconnecting ? 'text-amber-800 bg-amber-50' : 'text-blue-700 bg-blue-50'
+
+              const statusIcon = isLost
+                ? <WifiOff className="h-4 w-4 text-red-700" aria-label="Connection lost" />
+                : isReconnecting
+                  ? <Loader2 className="h-4 w-4 text-amber-700 animate-spin" aria-label="Reconnecting" />
+                  : <Wifi className="h-4 w-4 text-blue-700" aria-label="Connected" />
+
+              const statusLabel = isLost ? 'Connection lost' : isReconnecting ? 'Reconnecting…' : 'Live'
+
+              const disconnectBtnCls = isLost
+                ? 'text-red-700 hover:text-red-900 hover:bg-red-200'
+                : isReconnecting
+                  ? 'text-amber-700 hover:text-amber-900 hover:bg-amber-200'
+                  : 'text-blue-700 hover:text-blue-900 hover:bg-blue-200'
+
+              return (
+                <div className={`flex items-center gap-3 pl-3 pr-1 py-1.5 rounded-lg shadow-md ${containerCls}`}>
+                  <div className="flex items-center gap-2">
+                    {statusIcon}
+                    <span className={`text-sm font-bold ${textCls}`}>
+                      Remote Session: {selectedClient.client_name}
+                    </span>
+                    <span className={`text-[10px] font-semibold uppercase tracking-wide px-2 py-0.5 rounded ${subTextCls}`}>
+                      {statusLabel}
+                    </span>
+                    {selectedClient.ip_address && (
+                      <span className={`text-xs font-mono px-2 py-0.5 rounded ${subTextCls}`}>
+                        {selectedClient.ip_address}
+                      </span>
+                    )}
                   </div>
-                  <span className="text-sm font-bold text-blue-900">
-                    🔵 Remote Session: {selectedClient.client_name}
-                  </span>
-                  <span className="text-xs font-mono text-blue-700 bg-blue-50 px-2 py-1 rounded">
-                    {selectedClient.ip_address}
-                  </span>
+                  <button
+                    type="button"
+                    onClick={disconnectFromRemote}
+                    className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-semibold transition-colors ${disconnectBtnCls}`}
+                    title="Leave remote session and return to director"
+                    aria-label="Disconnect from remote client"
+                  >
+                    <XCircle className="h-4 w-4" />
+                    <span className="hidden sm:inline">Disconnect</span>
+                  </button>
                 </div>
-              </div>
-            )}
+              )
+            })()}
           </div>
 
           {/* Right side: Report Error Button + Client Selector */}

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useQueryClient } from 'react-query';
-import { Wifi, XCircle, RefreshCw, CheckCircle, AlertCircle, Copy } from 'lucide-react';
+import { Wifi, XCircle, RefreshCw, CheckCircle, AlertCircle, Copy, Eye, EyeOff } from 'lucide-react';
 import { identityAPI } from '../services/api';
 
 export default function ClientConfiguration() {
@@ -19,6 +19,7 @@ export default function ClientConfiguration() {
     const [connectionTestResult, setConnectionTestResult] = useState<any>(null);
     const [copied, setCopied] = useState(false);
     const [fieldErrors, setFieldErrors] = useState<{client_name?: boolean; director_url?: boolean}>({});
+    const [showToken, setShowToken] = useState(false);
 
     const fetchStatus = async () => {
         try {
@@ -349,13 +350,25 @@ export default function ClientConfiguration() {
                     <label className="block text-sm font-medium text-gray-700 mb-2">
                         Connection Token
                     </label>
-                    <input
-                        type="text"
-                        value={clientConfig.connection_token}
-                        onChange={(e) => setClientConfig({ ...clientConfig, connection_token: e.target.value })}
-                        className="input"
-                        placeholder="Leave empty if Director has no token (open access)"
-                    />
+                    <div className="relative">
+                        <input
+                            type={showToken ? 'text' : 'password'}
+                            value={clientConfig.connection_token}
+                            onChange={(e) => setClientConfig({ ...clientConfig, connection_token: e.target.value })}
+                            className="input pr-10"
+                            placeholder="Leave empty if Director has no token (open access)"
+                            autoComplete="new-password"
+                        />
+                        <button
+                            type="button"
+                            onClick={() => setShowToken((v) => !v)}
+                            className="absolute inset-y-0 right-0 flex items-center px-2 text-gray-500 hover:text-gray-800"
+                            title={showToken ? 'Hide token' : 'Reveal token'}
+                            aria-label={showToken ? 'Hide token' : 'Reveal token'}
+                        >
+                            {showToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        </button>
+                    </div>
                     <p className="mt-1 text-xs text-gray-500">
                         This token must match the Director's connection token (get it from Director's Settings). Leave empty if the Director has no token configured (open access mode).
                     </p>

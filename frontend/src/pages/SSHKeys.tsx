@@ -12,7 +12,10 @@ import {
   XCircle,
   AlertTriangle,
   FolderOpen,
-  FileUp
+  FileUp,
+  LayoutGrid,
+  List,
+  Lock
 } from 'lucide-react';
 import { sshKeysAPI, restoreAPI } from '../services/api';
 import { toast } from 'react-hot-toast';
@@ -26,6 +29,7 @@ interface SSHKey {
   key_type: string;
   public_key: string;
   is_active: boolean;
+  is_encrypted?: boolean;
   created_at: string;
   updated_at: string | null;
 }
@@ -37,7 +41,14 @@ const SSHKeys: React.FC = () => {
   const [showGenerateModal, setShowGenerateModal] = useState(false);
   const [showTestModal, setShowTestModal] = useState(false);
   const [editingKey, setEditingKey] = useState<SSHKey | null>(null);
-  const [testResult, setTestResult] = useState<{ success: boolean; message?: string; error?: string } | null>(null);
+  const [testResult, setTestResult] = useState<{
+    success: boolean;
+    message?: string;
+    error?: string;
+    borg?: { installed: boolean; version?: string; error?: string } | null;
+  } | null>(null);
+  // In-memory only — matches the Backups page pattern (no localStorage).
+  const [viewMode, setViewMode] = useState<'cards' | 'list'>('cards');
 
   // Get SSH keys
   const { data: sshKeysData, isLoading } = useQuery({
@@ -453,24 +464,51 @@ const SSHKeys: React.FC = () => {
             SSH Keys are needed for Borgmatic to authenticate in remote servers.
           </p>
         </div>
-        {user?.is_admin && (
-          <div className="flex space-x-3 flex-shrink-0">
-            <button
-              onClick={openGenerateModal}
-              className="flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-green-600 hover:bg-green-700"
-            >
-              <Plus className="w-4 h-4 mr-2" />
-              Generate Key
-            </button>
-            <button
-              onClick={openCreateModal}
-              className="flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700"
-            >
-              <Upload className="w-4 h-4 mr-2" />
-              Import Key
-            </button>
-          </div>
-        )}
+        <div className="flex items-center space-x-3 flex-shrink-0">
+          {/* View Mode Toggle — only when there is something to view, mirroring Backups */}
+          {(sshKeysData?.data?.ssh_keys?.length || 0) > 0 && (
+            <div className="flex items-center bg-gray-100 rounded-lg p-1">
+              <button
+                onClick={() => setViewMode('cards')}
+                className={`p-2 rounded-md transition-colors ${viewMode === 'cards'
+                  ? 'bg-white text-blue-600 shadow-sm'
+                  : 'text-gray-500 hover:text-gray-700'
+                  }`}
+                title="Card view"
+              >
+                <LayoutGrid className="w-4 h-4" />
+              </button>
+              <button
+                onClick={() => setViewMode('list')}
+                className={`p-2 rounded-md transition-colors ${viewMode === 'list'
+                  ? 'bg-white text-blue-600 shadow-sm'
+                  : 'text-gray-500 hover:text-gray-700'
+                  }`}
+                title="List view"
+              >
+                <List className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+          {user?.is_admin && (
+            <>
+              <button
+                onClick={openGenerateModal}
+                className="flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-green-600 hover:bg-green-700"
+              >
+                <Plus className="w-4 h-4 mr-2" />
+                Generate Key
+              </button>
+              <button
+                onClick={openCreateModal}
+                className="flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700"
+              >
+                <Upload className="w-4 h-4 mr-2" />
+                Import Key
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       {/* SSH Keys List */}
@@ -478,6 +516,118 @@ const SSHKeys: React.FC = () => {
         <div className="text-center py-8">
           <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto"></div>
           <p className="mt-2 text-gray-600">Loading SSH keys...</p>
+        </div>
+      ) : viewMode === 'list' ? (
+        <div className="bg-white rounded-lg border shadow-sm overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Type</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Encrypted</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Created</th>
+                  {user?.is_admin && (
+                    <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                  )}
+                </tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-200">
+                {(sshKeysData?.data?.ssh_keys || []).length === 0 ? (
+                  <tr>
+                    <td colSpan={user?.is_admin ? 6 : 5} className="px-4 py-6 text-center text-sm text-gray-500">
+                      No SSH keys yet.
+                    </td>
+                  </tr>
+                ) : (
+                  sshKeysData?.data?.ssh_keys?.map((sshKey: SSHKey) => (
+                    <tr key={sshKey.id} className="hover:bg-gray-50">
+                      <td className="px-4 py-2 whitespace-nowrap">
+                        <div className="flex items-center space-x-2">
+                          {getKeyTypeIcon(sshKey.key_type)}
+                          <div>
+                            <div className="text-sm font-medium text-gray-900">{sshKey.name}</div>
+                            {sshKey.description && (
+                              <div className="text-xs text-gray-500 truncate max-w-xs" title={sshKey.description}>
+                                {sshKey.description}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-700">
+                        {getKeyTypeLabel(sshKey.key_type)}
+                      </td>
+                      <td className="px-4 py-2 whitespace-nowrap">
+                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${sshKey.is_active
+                          ? 'bg-green-100 text-green-800'
+                          : 'bg-red-100 text-red-800'
+                          }`}>
+                          {sshKey.is_active ? 'Active' : 'Inactive'}
+                        </span>
+                      </td>
+                      <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-700">
+                        {sshKey.is_encrypted ? (
+                          <span className="inline-flex items-center text-amber-700" title="Encrypted (requires passphrase)">
+                            <Lock className="w-3.5 h-3.5 mr-1" />
+                            Yes
+                          </span>
+                        ) : (
+                          <span className="text-gray-400">No</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-700">
+                        {new Date(sshKey.created_at).toLocaleDateString()}
+                      </td>
+                      {user?.is_admin && (
+                        <td className="px-4 py-2 whitespace-nowrap text-right">
+                          <div className="flex items-center justify-end space-x-2">
+                            <button
+                              onClick={() => openTestModal(sshKey.id)}
+                              disabled={testConnectionMutation.isLoading}
+                              className="inline-flex items-center px-2 py-1 text-xs font-medium text-blue-600 hover:text-blue-800 disabled:opacity-50"
+                              title="Test SSH connection"
+                            >
+                              <Wifi className="w-3.5 h-3.5 mr-1" />
+                              Test
+                            </button>
+                            <button
+                              onClick={() => {
+                                navigator.clipboard.writeText(sshKey.public_key);
+                                toast.success('Public key copied to clipboard');
+                              }}
+                              className="inline-flex items-center px-2 py-1 text-xs font-medium text-gray-600 hover:text-gray-800"
+                              title="Copy public key"
+                            >
+                              <Download className="w-3.5 h-3.5 mr-1" />
+                              Copy
+                            </button>
+                            <button
+                              onClick={() => openEditModal(sshKey)}
+                              className="inline-flex items-center px-2 py-1 text-xs font-medium text-gray-600 hover:text-gray-800"
+                              title="Edit"
+                            >
+                              <Edit className="w-3.5 h-3.5 mr-1" />
+                              Edit
+                            </button>
+                            <button
+                              onClick={() => handleDeleteSSHKey(sshKey)}
+                              className="inline-flex items-center px-2 py-1 text-xs font-medium text-red-600 hover:text-red-800"
+                              title="Delete"
+                            >
+                              <Trash2 className="w-3.5 h-3.5 mr-1" />
+                              Delete
+                            </button>
+                          </div>
+                        </td>
+                      )}
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">

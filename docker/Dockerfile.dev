@@ -18,6 +18,7 @@ RUN apk add --no-cache \
     git \
     openssh-client \
     sshpass \
+    sshfs \
     github-cli \
     sudo \
     docker-cli \
@@ -41,6 +42,7 @@ RUN apk add --no-cache \
     lz4-dev \
     zstd-dev \
     xxhash-dev \
+    fuse3 \
     fuse3-dev \
     linux-headers \
     pkgconfig \

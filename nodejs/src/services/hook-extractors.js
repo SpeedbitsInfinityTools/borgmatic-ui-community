@@ -152,6 +152,61 @@ function extractGitRepoSourcesFromHooks(config) {
     return sources;
 }
 
+/**
+ * Extract SSH/SFTP source rows from the wizard-emitted before-hooks.
+ *
+ * The before-hook script for an SSH source carries a base64 metadata marker
+ * with all non-secret wizard fields. We decode and return them so the
+ * Backups page (and the Edit-Backup wizard) can show / round-trip the
+ * source. Secrets (password) are referenced by env-var name only and are
+ * never embedded in the marker.
+ */
+function extractSshSourcesFromHooks(config) {
+    const sources = [];
+    const hooks = [];
+    if (Array.isArray(config.commands)) {
+        for (const commandHook of config.commands) {
+            if (!commandHook || !Array.isArray(commandHook.run)) continue;
+            hooks.push(...commandHook.run);
+        }
+    }
+    const marker = 'BORGMATIC_UI_SSH_META_B64:';
+
+    for (const hook of hooks) {
+        if (typeof hook !== 'string' || !hook.includes(marker)) continue;
+        try {
+            const line = hook.split('\n').find((l) => l.includes(marker));
+            if (!line) continue;
+            const encoded = line.substring(line.indexOf(marker) + marker.length).trim();
+            const parsed = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
+            if (parsed?.type === 'ssh') {
+                const passwordEnvVar = parsed.ssh_password_env_var;
+                const passwordPlaceholder = typeof passwordEnvVar === 'string'
+                    && /^[A-Za-z_][A-Za-z0-9_]*$/.test(passwordEnvVar)
+                    ? '${' + passwordEnvVar + '}'
+                    : undefined;
+                sources.push({
+                    type: 'ssh',
+                    host: parsed.host,
+                    port: parsed.port || 22,
+                    username: parsed.username,
+                    auth_method: parsed.auth_method || 'key',
+                    ssh_key_id: parsed.ssh_key_id || null,
+                    ssh_password: passwordPlaceholder,
+                    remote_path: parsed.remote_path,
+                    mount_point: parsed.mount_point,
+                    mount_options: parsed.mount_options || '',
+                    exclude_patterns: Array.isArray(parsed.exclude_patterns) ? parsed.exclude_patterns : [],
+                });
+            }
+        } catch (e) {
+            // Ignore malformed metadata markers from older/broken configs.
+        }
+    }
+
+    return sources;
+}
+
 // ---------------------------------------------------------------------------
 // Source summary builders (for UI display)
 // ---------------------------------------------------------------------------
@@ -216,11 +271,27 @@ function getSourcesSummary(config) {
         };
     }));
 
+    const sshSources = extractSshSourcesFromHooks(config);
+    const sshMountPoints = new Set();
+    for (const ss of sshSources) {
+        if (ss.mount_point) sshMountPoints.add(ss.mount_point);
+    }
+    sources.push(...sshSources.map((ss) => ({
+        type: 'ssh',
+        host: ss.host,
+        port: ss.port,
+        username: ss.username,
+        auth_method: ss.auth_method,
+        ssh_key_id: ss.ssh_key_id,
+        remote_path: ss.remote_path,
+        mount_point: ss.mount_point,
+    })));
+
     const sourceDirs = config.source_directories || config.location?.source_directories || [];
     sources.push(...sourceDirs.map(dir => ({
         type: 'local',
         path: dir
-    })).filter((s) => !isDumpTempPath(s.path) && !gitRepoPaths.has(s.path)));
+    })).filter((s) => !isDumpTempPath(s.path) && !gitRepoPaths.has(s.path) && !sshMountPoints.has(s.path)));
 
     ['postgresql', 'mysql', 'mariadb', 'mongodb', 'sqlite'].forEach(dbType => {
         const dbKey = `${dbType}_databases`;
@@ -304,10 +375,18 @@ function extractSourcesFromConfig(config) {
         sources.push({ ...gs, type: 'git_repos' });
     }
 
+    const sshSources = extractSshSourcesFromHooks(config);
+    const sshMountPoints = new Set();
+    for (const ss of sshSources) {
+        if (ss.mount_point) sshMountPoints.add(ss.mount_point);
+        sources.push({ ...ss, type: 'ssh' });
+    }
+
     const sourceDirs = config.source_directories || config.location?.source_directories || [];
     for (const dir of sourceDirs) {
         if (isDumpTempPath(dir)) continue;
         if (gitRepoPaths.has(dir)) continue;
+        if (sshMountPoints.has(dir)) continue;
         sources.push({ type: 'local', path: dir });
     }
 
@@ -407,6 +486,7 @@ module.exports = {
     extractMssqlSourcesFromHooks,
     extractDbDumpSourcesFromHooks,
     extractGitRepoSourcesFromHooks,
+    extractSshSourcesFromHooks,
     isDumpTempPath,
     getSourcesSummary,
     extractSourcesFromConfig,

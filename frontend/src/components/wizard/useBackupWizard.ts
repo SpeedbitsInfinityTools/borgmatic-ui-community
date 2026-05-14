@@ -238,6 +238,7 @@ export function useBackupWizard({ onClose, onSuccess, editBackup, mode = 'produc
                 if (c.pat) newSources[c.index] = { ...newSources[c.index], pat: c.pat };
                 if (c.bb_app_password) newSources[c.index] = { ...newSources[c.index], bb_app_password: c.bb_app_password };
                 if (c.password) newSources[c.index] = { ...newSources[c.index], password: c.password };
+                if (c.ssh_password) newSources[c.index] = { ...newSources[c.index], ssh_password: c.ssh_password };
               }
             }
             return { ...prev, sources: newSources };
@@ -251,7 +252,8 @@ export function useBackupWizard({ onClose, onSuccess, editBackup, mode = 'produc
     const hasLocal = formData.sources.some((s: any) => s.type === 'local');
     const hasDb = formData.sources.some((s: any) => DB_TYPES.includes(s.type));
     const hasGit = formData.sources.some((s: any) => s.type === 'git_repos');
-    const groupCount = (hasLocal ? 1 : 0) + (hasDb ? 1 : 0) + (hasGit ? 1 : 0);
+    const hasSsh = formData.sources.some((s: any) => s.type === 'ssh');
+    const groupCount = (hasLocal ? 1 : 0) + (hasDb ? 1 : 0) + (hasGit ? 1 : 0) + (hasSsh ? 1 : 0);
     if (groupCount > 1 && !helpAutoCollapsed) {
       setDbHelpExpanded(false);
       setGitHelpExpanded(false);
@@ -464,6 +466,41 @@ export function useBackupWizard({ onClose, onSuccess, editBackup, mode = 'produc
     const newErrors: Record<string, string> = {};
     if (step === 1 && !formData.name.trim()) newErrors.name = 'Backup name is required';
     if (step === 2 && formData.sources.length === 0) newErrors.sources = 'At least one source is required';
+    if (step === 2) {
+      // SSH sources: require host/username/remote_path and one of (key | password).
+      // Caught here (rather than only on submit) so the user sees the issue
+      // before navigating away from the Sources step.
+      const sshSources = (formData.sources || []).filter((s: any) => s?.type === 'ssh');
+      for (let i = 0; i < sshSources.length; i++) {
+        const s = sshSources[i];
+        const idxLabel = sshSources.length > 1 ? ` #${i + 1}` : '';
+        if (!String(s.host || '').trim()) {
+          newErrors.sources = `SSH source${idxLabel}: host is required`;
+          break;
+        }
+        if (!String(s.username || '').trim()) {
+          newErrors.sources = `SSH source${idxLabel}: username is required`;
+          break;
+        }
+        if (!String(s.remote_path || '').trim()) {
+          newErrors.sources = `SSH source${idxLabel}: remote path is required`;
+          break;
+        }
+        const auth = s.auth_method === 'password' ? 'password' : 'key';
+        if (auth === 'key' && !s.ssh_key_id) {
+          newErrors.sources = `SSH source${idxLabel}: select an SSH key or switch to password authentication`;
+          break;
+        }
+        if (auth === 'password') {
+          const pw = s.ssh_password;
+          const isPlaceholder = typeof pw === 'string' && /^\$\{BORGMATIC_UI_SSHPASS_/.test(pw);
+          if (!pw || (typeof pw === 'string' && !pw.trim() && !isPlaceholder)) {
+            newErrors.sources = `SSH source${idxLabel}: enter the SSH password or switch to key authentication`;
+            break;
+          }
+        }
+      }
+    }
     if (step === 3 && formData.repositories.length === 0) newErrors.repositories = 'At least one repository is required';
     if (step === 4 && !formData.retention_profile_id) newErrors.retention = 'Please select a retention profile';
     setErrors(newErrors);
@@ -583,7 +620,7 @@ export function useBackupWizard({ onClose, onSuccess, editBackup, mode = 'produc
     }
   };
 
-  const addSource = (type: 'local' | 'database' | 'git_repos') => {
+  const addSource = (type: 'local' | 'database' | 'git_repos' | 'ssh') => {
     let newSource: any;
     if (type === 'local') {
       newSource = { type: 'local', path: '' };
@@ -593,6 +630,15 @@ export function useBackupWizard({ onClose, onSuccess, editBackup, mode = 'produc
         backup_type: 'mirror', target_dir: '', organization: '', user: '', pat: '',
         repo_selection: 'all', selected_repos: [],
         include_private: true, include_forks: false, group_by_project: true, prune: true,
+      };
+    } else if (type === 'ssh') {
+      newSource = {
+        type: 'ssh',
+        host: '', port: 22, username: '',
+        auth_method: 'key', ssh_key_id: null, ssh_password: '',
+        remote_path: '',
+        mount_options: '',
+        exclude_patterns: [],
       };
     } else {
       newSource = { type: 'postgresql', database_name: '', hostname: 'localhost', port: 5432, username: '', password: '', dump_method: 'native' };

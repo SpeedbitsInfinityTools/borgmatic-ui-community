@@ -20,10 +20,13 @@ import {
     Zap,
     Sparkles,
     Pencil,
+    Search,
+    Users,
 } from 'lucide-react';
 import NotificationServicePicker from '../components/notifications/NotificationServicePicker';
 import NotificationServiceForm from '../components/notifications/NotificationServiceForm';
 import NtfyConfigForm from '../components/notifications/NtfyConfigForm';
+import SharedNotificationSettings from '../components/notifications/SharedNotificationSettings';
 
 interface NotificationConfig {
     notifications: {
@@ -405,12 +408,166 @@ function AppriseApiConfig() {
     );
 }
 
+// Modal for picking which clients receive forwarded notifications when the
+// director is in "Only specific clients" mode. Designed to scale from a
+// handful to many dozens of clients (search + select-all + scrollable list).
+interface ClientPickerModalProps {
+    clients: any[];
+    initialSelected: string[];
+    onClose: () => void;
+    onSave: (ids: string[]) => void | Promise<void>;
+}
+
+function ClientPickerModal({ clients, initialSelected, onClose, onSave }: ClientPickerModalProps) {
+    const [selected, setSelected] = useState<string[]>(initialSelected);
+    const [search, setSearch] = useState('');
+    const [saving, setSaving] = useState(false);
+
+    const normalizedSearch = search.trim().toLowerCase();
+    const visibleClients = normalizedSearch
+        ? clients.filter((c: any) => {
+            const haystack = `${c.client_name || ''} ${c.hostname || ''} ${c.client_id || ''}`.toLowerCase();
+            return haystack.includes(normalizedSearch);
+        })
+        : clients;
+
+    const visibleIds = visibleClients.map((c: any) => c.client_id);
+    const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id: string) => selected.includes(id));
+    const someVisibleSelected = visibleIds.some((id: string) => selected.includes(id));
+
+    const toggleClient = (id: string) => {
+        setSelected(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+    };
+
+    const toggleAllVisible = () => {
+        if (allVisibleSelected) {
+            // Deselect every currently visible row, leave non-matching selections alone.
+            setSelected(prev => prev.filter(id => !visibleIds.includes(id)));
+        } else {
+            // Select every currently visible row, deduped against existing selections.
+            setSelected(prev => Array.from(new Set([...prev, ...visibleIds])));
+        }
+    };
+
+    const handleSave = async () => {
+        setSaving(true);
+        try {
+            await onSave(selected);
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    return (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 z-50 flex items-center justify-center p-4">
+            <div className="bg-white rounded-lg shadow-xl w-full max-w-lg max-h-[85vh] flex flex-col">
+                <div className="flex items-center justify-between px-5 py-3 border-b border-gray-200">
+                    <h3 className="text-base font-semibold text-gray-900 flex items-center">
+                        <Users className="w-4 h-4 mr-2 text-blue-600" />
+                        Select clients
+                    </h3>
+                    <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
+                        <X className="w-5 h-5" />
+                    </button>
+                </div>
+
+                <div className="px-5 py-3 border-b border-gray-100 space-y-2">
+                    <div className="relative">
+                        <Search className="w-4 h-4 text-gray-400 absolute left-2 top-1/2 -translate-y-1/2" />
+                        <input
+                            type="text"
+                            value={search}
+                            onChange={(e) => setSearch(e.target.value)}
+                            placeholder="Search by name, hostname, or ID…"
+                            className="w-full pl-8 pr-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                            autoFocus
+                        />
+                    </div>
+                    <label className="flex items-center justify-between text-xs text-gray-600 px-1">
+                        <div className="flex items-center space-x-2">
+                            <input
+                                type="checkbox"
+                                checked={allVisibleSelected}
+                                ref={el => { if (el) el.indeterminate = !allVisibleSelected && someVisibleSelected; }}
+                                onChange={toggleAllVisible}
+                                disabled={visibleIds.length === 0}
+                                className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                            />
+                            <span>
+                                {normalizedSearch
+                                    ? (allVisibleSelected ? 'Deselect all (filtered)' : 'Select all (filtered)')
+                                    : (allVisibleSelected ? 'Deselect all' : 'Select all')}
+                            </span>
+                        </div>
+                        <span className="text-gray-500">
+                            {selected.length} selected · {visibleClients.length} shown
+                        </span>
+                    </label>
+                </div>
+
+                <div className="flex-1 overflow-y-auto px-2 py-2">
+                    {visibleClients.length === 0 ? (
+                        <p className="text-center text-sm text-gray-500 py-8">
+                            {clients.length === 0 ? 'No clients have connected to this director yet.' : 'No clients match your search.'}
+                        </p>
+                    ) : (
+                        <ul className="space-y-1">
+                            {visibleClients.map((c: any) => {
+                                const checked = selected.includes(c.client_id);
+                                const label = c.client_name || c.hostname || c.client_id;
+                                const sub = [c.hostname, c.client_id].filter(Boolean).join(' · ');
+                                return (
+                                    <li key={c.client_id}>
+                                        <label className={`flex items-center justify-between px-3 py-2 rounded cursor-pointer transition-colors ${checked ? 'bg-blue-50 border border-blue-200' : 'border border-transparent hover:bg-gray-50'}`}>
+                                            <div className="min-w-0 flex-1 mr-3">
+                                                <div className="text-sm font-medium text-gray-900 truncate">{label}</div>
+                                                {sub && (
+                                                    <div className="text-xs text-gray-500 truncate" title={sub}>{sub}</div>
+                                                )}
+                                            </div>
+                                            <input
+                                                type="checkbox"
+                                                checked={checked}
+                                                onChange={() => toggleClient(c.client_id)}
+                                                className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded flex-shrink-0"
+                                            />
+                                        </label>
+                                    </li>
+                                );
+                            })}
+                        </ul>
+                    )}
+                </div>
+
+                <div className="px-5 py-3 border-t border-gray-200 flex items-center justify-end space-x-2 bg-gray-50">
+                    <button
+                        onClick={onClose}
+                        disabled={saving}
+                        className="px-3 py-1.5 text-sm text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50"
+                    >
+                        Cancel
+                    </button>
+                    <button
+                        onClick={handleSave}
+                        disabled={saving}
+                        className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 disabled:opacity-50"
+                    >
+                        {saving ? <Loader className="w-4 h-4 mr-1.5 animate-spin" /> : <Check className="w-4 h-4 mr-1.5" />}
+                        Save
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
 // Director Forwarding Configuration Component
 function DirectorForwardingConfig() {
     const queryClient = useQueryClient();
     const [config, setConfig] = useState<any>(null);
     const [availableEvents, setAvailableEvents] = useState<any[]>([]);
     const [selectedClientIds, setSelectedClientIds] = useState<string[]>([]);
+    const [showClientPicker, setShowClientPicker] = useState(false);
 
     const { data: configData, isLoading } = useQuery({
         queryKey: ['director-notifications-config'],
@@ -503,7 +660,7 @@ function DirectorForwardingConfig() {
         await saveMutation.mutateAsync(newConfig);
     };
 
-    const handleClientFilterModeChange = async (mode: 'all' | 'include' | 'exclude') => {
+    const handleClientFilterModeChange = async (mode: 'all' | 'include') => {
         const newConfig = {
             ...config,
             client_filters: {
@@ -515,22 +672,27 @@ function DirectorForwardingConfig() {
         await saveMutation.mutateAsync(newConfig);
     };
 
-    const handleClientToggle = async (clientId: string) => {
-        const newSelected = selectedClientIds.includes(clientId)
-            ? selectedClientIds.filter(id => id !== clientId)
-            : [...selectedClientIds, clientId];
-
-        setSelectedClientIds(newSelected);
-
+    // Persist a fresh selection in one shot — used by the picker modal so we
+    // don't fire a save per checkbox click.
+    const handleClientSelectionSave = async (clientIds: string[]) => {
+        setSelectedClientIds(clientIds);
         const newConfig = {
             ...config,
             client_filters: {
                 ...config.client_filters,
-                client_ids: newSelected,
+                mode: 'include',
+                client_ids: clientIds,
             },
         };
         setConfig(newConfig);
         await saveMutation.mutateAsync(newConfig);
+    };
+
+    // Used by individual chip "X" buttons to remove a single client without
+    // opening the picker.
+    const handleRemoveSelectedClient = async (clientId: string) => {
+        const newSelected = selectedClientIds.filter(id => id !== clientId);
+        await handleClientSelectionSave(newSelected);
     };
 
     return (
@@ -613,53 +775,118 @@ function DirectorForwardingConfig() {
                     <div>
                         <h3 className="text-sm font-medium text-gray-700 mb-3">Client Filters</h3>
                         <div className="space-y-3">
-                            <div className="flex items-center space-x-4">
-                                <label className="flex items-center space-x-2">
-                                    <input
-                                        type="radio"
-                                        name="clientFilterMode"
-                                        checked={(config.client_filters?.mode || 'all') === 'all'}
-                                        onChange={() => handleClientFilterModeChange('all')}
-                                    />
-                                    <span className="text-sm">All clients</span>
-                                </label>
-                                <label className="flex items-center space-x-2">
-                                    <input
-                                        type="radio"
-                                        name="clientFilterMode"
-                                        checked={config.client_filters?.mode === 'include'}
-                                        onChange={() => handleClientFilterModeChange('include')}
-                                    />
-                                    <span className="text-sm">Only these clients</span>
-                                </label>
-                                <label className="flex items-center space-x-2">
-                                    <input
-                                        type="radio"
-                                        name="clientFilterMode"
-                                        checked={config.client_filters?.mode === 'exclude'}
-                                        onChange={() => handleClientFilterModeChange('exclude')}
-                                    />
-                                    <span className="text-sm">Exclude these clients</span>
-                                </label>
-                            </div>
+                            {/* Backend shape: { success, data: { clients: [...], summary, categorized } }.
+                                Tolerate a few legacy shapes too so we never crash the panel again. */}
+                            {(() => {
+                                const raw = clientsData?.data?.data;
+                                const clientList: any[] = Array.isArray(raw)
+                                    ? raw
+                                    : Array.isArray(raw?.clients)
+                                        ? raw.clients
+                                        : Array.isArray(clientsData?.data)
+                                            ? (clientsData!.data as any[])
+                                            : [];
+                                const clientById = new Map(clientList.map((c: any) => [c.client_id, c]));
+                                const currentMode = config.client_filters?.mode || 'all';
+                                const isLegacyExclude = currentMode === 'exclude';
+                                const isInclude = currentMode === 'include';
 
-                            {(config.client_filters?.mode === 'include' || config.client_filters?.mode === 'exclude') && (
-                                <div className="grid grid-cols-2 gap-2">
-                                    {(clientsData?.data?.data || []).map((client: any) => (
-                                        <label key={client.client_id} className="flex items-center space-x-2 p-2 bg-gray-50 rounded">
-                                            <input
-                                                type="checkbox"
-                                                checked={selectedClientIds.includes(client.client_id)}
-                                                onChange={() => handleClientToggle(client.client_id)}
+                                return (
+                                    <>
+                                        <div className="flex items-center space-x-6">
+                                            <label className="flex items-center space-x-2 cursor-pointer">
+                                                <input
+                                                    type="radio"
+                                                    name="clientFilterMode"
+                                                    checked={currentMode === 'all'}
+                                                    onChange={() => handleClientFilterModeChange('all')}
+                                                />
+                                                <span className="text-sm">All clients</span>
+                                            </label>
+                                            <label className="flex items-center space-x-2 cursor-pointer">
+                                                <input
+                                                    type="radio"
+                                                    name="clientFilterMode"
+                                                    checked={isInclude}
+                                                    onChange={() => handleClientFilterModeChange('include')}
+                                                />
+                                                <span className="text-sm">Only specific clients</span>
+                                            </label>
+                                        </div>
+
+                                        {isLegacyExclude && (
+                                            <div className="flex items-start space-x-2 p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800">
+                                                <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                                                <div className="text-xs">
+                                                    This director is in legacy <strong>exclude</strong> mode (skipping {selectedClientIds.length} client{selectedClientIds.length === 1 ? '' : 's'}). Pick a new option above to migrate.
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {isInclude && (
+                                            <div className="space-y-2">
+                                                <div className="flex flex-wrap items-center gap-1.5">
+                                                    {selectedClientIds.length === 0 ? (
+                                                        <span className="text-sm text-gray-500 italic">No clients selected — notifications will be forwarded for none.</span>
+                                                    ) : (
+                                                        selectedClientIds.map((id) => {
+                                                            const c = clientById.get(id) as any;
+                                                            const label = c?.client_name || c?.hostname || id;
+                                                            return (
+                                                                <span
+                                                                    key={id}
+                                                                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs bg-blue-50 text-blue-700 border border-blue-200"
+                                                                    title={c ? `${label} (${id})` : `Unknown client (${id})`}
+                                                                >
+                                                                    <span className="truncate max-w-[14rem]">{label}</span>
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => handleRemoveSelectedClient(id)}
+                                                                        className="ml-0.5 text-blue-500 hover:text-blue-700"
+                                                                        title="Remove from list"
+                                                                    >
+                                                                        <X className="w-3 h-3" />
+                                                                    </button>
+                                                                </span>
+                                                            );
+                                                        })
+                                                    )}
+                                                </div>
+                                                <div>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setShowClientPicker(true)}
+                                                        className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded-md hover:bg-blue-100 transition-colors"
+                                                    >
+                                                        <Users className="w-4 h-4 mr-1.5" />
+                                                        Select clients
+                                                        {clientList.length > 0 && (
+                                                            <span className="ml-1.5 text-xs text-blue-600">
+                                                                ({selectedClientIds.length} of {clientList.length} selected)
+                                                            </span>
+                                                        )}
+                                                    </button>
+                                                    {clientList.length === 0 && (
+                                                        <p className="mt-1 text-xs text-gray-500">No clients have connected to this director yet.</p>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {showClientPicker && (
+                                            <ClientPickerModal
+                                                clients={clientList}
+                                                initialSelected={selectedClientIds}
+                                                onClose={() => setShowClientPicker(false)}
+                                                onSave={async (ids) => {
+                                                    setShowClientPicker(false);
+                                                    await handleClientSelectionSave(ids);
+                                                }}
                                             />
-                                            <span className="text-sm">{client.client_name || client.client_id}</span>
-                                        </label>
-                                    ))}
-                                    {(!clientsData?.data?.data || clientsData?.data?.data.length === 0) && (
-                                        <p className="text-sm text-gray-500">No clients available.</p>
-                                    )}
-                                </div>
-                            )}
+                                        )}
+                                    </>
+                                );
+                            })()}
                         </div>
                     </div>
 
@@ -698,7 +925,6 @@ export default function Notifications() {
     const [selectedService, setSelectedService] = useState<string | null>(null);
     const [destinations, setDestinations] = useState<ConfiguredDestination[]>([]);
     const [showHelpModal, setShowHelpModal] = useState(false);
-    const [enabledEvents, setEnabledEvents] = useState({ success: false, failure: true, warning: true, security_alert: true });
     const [selectedProvider, setSelectedProvider] = useState<'apprise' | 'ntfy'>('ntfy');
     const [routingMode, setRoutingMode] = useState<'director_only' | 'local_only' | 'both'>('both');
     const [editingDestination, setEditingDestination] = useState<ConfiguredDestination | null>(null);
@@ -757,12 +983,6 @@ export default function Notifications() {
                 });
             });
             setDestinations(parsedDestinations);
-            setEnabledEvents({
-                success: config.notifications?.success?.enabled || false,
-                failure: config.notifications?.failure?.enabled ?? true,
-                warning: config.notifications?.warning?.enabled ?? true,
-                security_alert: config.notifications?.security_alert?.enabled ?? true,
-            });
         }
     }, [appriseConfigData, selectedProvider]);
 
@@ -923,25 +1143,6 @@ export default function Notifications() {
         toast.success('Destination removed');
     };
 
-    const handleToggleEvent = async (eventType: 'success' | 'failure' | 'warning' | 'security_alert') => {
-        const config = appriseConfigData?.data as NotificationConfig;
-        if (!config) return;
-        
-        // Ensure the notification type exists
-        if (!config.notifications[eventType]) {
-            config.notifications[eventType] = {
-                enabled: false,
-                urls: [],
-                title: eventType === 'security_alert' ? '🚨 Security Alert' : `Backup ${eventType.charAt(0).toUpperCase() + eventType.slice(1)}`,
-                body: eventType === 'security_alert' ? 'Critical security event detected' : `Backup ${eventType}`
-            };
-        }
-        
-        config.notifications[eventType].enabled = !config.notifications[eventType].enabled;
-        setEnabledEvents(prev => ({ ...prev, [eventType]: !prev[eventType] }));
-        await saveAppriseMutation.mutateAsync(config);
-    };
-
     const isLoading = routingLoading || (selectedProvider === 'apprise' ? appriseLoading : ntfyLoading);
 
     if (isLoading) {
@@ -980,38 +1181,37 @@ export default function Notifications() {
             {/* Client Mode Routing Options */}
             {mode === 'client' && (
                 <div className="card">
-                    <div className="px-6 py-4 border-b border-gray-200">
-                        <h2 className="text-lg font-medium text-gray-900 flex items-center">
-                            <Radio className="w-5 h-5 mr-2 text-primary-600" />
+                    <div className="px-4 py-3 border-b border-gray-200">
+                        <h2 className="text-base font-medium text-gray-900 flex items-center">
+                            <Radio className="w-4 h-4 mr-2 text-primary-600" />
                             Notification Routing
                         </h2>
-                        <p className="mt-1 text-sm text-gray-500">Choose where notifications are sent when running in client mode</p>
                     </div>
-                    <div className="p-6">
-                        <div className="grid grid-cols-3 gap-4">
+                    <div className="p-4">
+                        <div className="grid grid-cols-3 gap-2">
                             <button
                                 onClick={() => handleRoutingChange('director_only')}
-                                className={`p-4 rounded-lg border-2 text-left transition-all ${routingMode === 'director_only' ? 'border-primary-500 bg-primary-50' : 'border-gray-200 hover:border-gray-300'}`}
+                                title="Send all notifications to the Director server."
+                                className={`p-3 rounded-lg border text-left transition-all ${routingMode === 'director_only' ? 'border-primary-500 bg-primary-50' : 'border-gray-200 hover:border-gray-300'}`}
                             >
-                                <Server className={`w-6 h-6 mb-2 ${routingMode === 'director_only' ? 'text-primary-600' : 'text-gray-400'}`} />
-                                <h3 className="font-medium text-gray-900">Director Only</h3>
-                                <p className="text-sm text-gray-500 mt-1">Send all notifications to the Director server.</p>
+                                <Server className={`w-5 h-5 mb-1 ${routingMode === 'director_only' ? 'text-primary-600' : 'text-gray-400'}`} />
+                                <h3 className="font-medium text-gray-900 text-sm">Borgmatic UI Director only</h3>
                             </button>
                             <button
                                 onClick={() => handleRoutingChange('local_only')}
-                                className={`p-4 rounded-lg border-2 text-left transition-all ${routingMode === 'local_only' ? 'border-primary-500 bg-primary-50' : 'border-gray-200 hover:border-gray-300'}`}
+                                title="Send notifications directly from this client."
+                                className={`p-3 rounded-lg border text-left transition-all ${routingMode === 'local_only' ? 'border-primary-500 bg-primary-50' : 'border-gray-200 hover:border-gray-300'}`}
                             >
-                                <Monitor className={`w-6 h-6 mb-2 ${routingMode === 'local_only' ? 'text-primary-600' : 'text-gray-400'}`} />
-                                <h3 className="font-medium text-gray-900">Local Only</h3>
-                                <p className="text-sm text-gray-500 mt-1">Send notifications directly from this client.</p>
+                                <Monitor className={`w-5 h-5 mb-1 ${routingMode === 'local_only' ? 'text-primary-600' : 'text-gray-400'}`} />
+                                <h3 className="font-medium text-gray-900 text-sm">Local Only</h3>
                             </button>
                             <button
                                 onClick={() => handleRoutingChange('both')}
-                                className={`p-4 rounded-lg border-2 text-left transition-all ${routingMode === 'both' ? 'border-primary-500 bg-primary-50' : 'border-gray-200 hover:border-gray-300'}`}
+                                title="Send to both Director and local destinations."
+                                className={`p-3 rounded-lg border text-left transition-all ${routingMode === 'both' ? 'border-primary-500 bg-primary-50' : 'border-gray-200 hover:border-gray-300'}`}
                             >
-                                <Zap className={`w-6 h-6 mb-2 ${routingMode === 'both' ? 'text-primary-600' : 'text-gray-400'}`} />
-                                <h3 className="font-medium text-gray-900">Both</h3>
-                                <p className="text-sm text-gray-500 mt-1">Send to both Director and local destinations.</p>
+                                <Zap className={`w-5 h-5 mb-1 ${routingMode === 'both' ? 'text-primary-600' : 'text-gray-400'}`} />
+                                <h3 className="font-medium text-gray-900 text-sm">Both</h3>
                             </button>
                         </div>
                     </div>
@@ -1021,49 +1221,39 @@ export default function Notifications() {
             {/* Provider Selection */}
             {(mode === 'standalone' || (mode === 'client' && routingMode !== 'director_only')) && (
                 <div className="card">
-                    <div className="px-6 py-4 border-b border-gray-200">
-                        <h2 className="text-lg font-medium text-gray-900">Notification Provider</h2>
-                        <p className="mt-1 text-sm text-gray-500">Choose how to send local notifications</p>
+                    <div className="px-4 py-3 border-b border-gray-200">
+                        <h2 className="text-base font-medium text-gray-900">Notification Provider</h2>
                     </div>
-                    <div className="p-6">
-                        <div className="grid grid-cols-2 gap-4">
+                    <div className="p-4">
+                        <div className="grid grid-cols-2 gap-2">
                             <button
                                 onClick={() => handleProviderChange('ntfy')}
-                                className={`p-4 rounded-lg border-2 text-left transition-all ${selectedProvider === 'ntfy' ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'}`}
+                                title="Direct push notifications. Simple setup, no dependencies."
+                                className={`p-3 rounded-lg border text-left transition-all ${selectedProvider === 'ntfy' ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'}`}
                             >
                                 <div className="flex items-center space-x-3">
-                                    <span className="text-2xl">📱</span>
-                                    <div>
-                                        <h3 className="font-medium text-gray-900">ntfy (Native)</h3>
-                                        <p className="text-sm text-gray-500">Direct push notifications. Simple setup, no dependencies.</p>
-                                    </div>
+                                    <span className="text-xl">📱</span>
+                                    <h3 className="font-medium text-gray-900 text-sm">ntfy (Native)</h3>
                                 </div>
-                                {selectedProvider === 'ntfy' && (
-                                    <div className="mt-3 flex items-center text-sm text-blue-600">
-                                        <Check className="w-4 h-4 mr-1" />Selected
-                                    </div>
-                                )}
                             </button>
                             <button
                                 onClick={() => handleProviderChange('apprise')}
-                                className={`p-4 rounded-lg border-2 text-left transition-all ${selectedProvider === 'apprise' ? 'border-purple-500 bg-purple-50' : 'border-gray-200 hover:border-gray-300'}`}
+                                title="Slack, Discord, Email, Telegram, and many more (80+ services). Each Apprise URL embeds its own credentials — there is no global username/password."
+                                className={`p-3 rounded-lg border text-left transition-all ${selectedProvider === 'apprise' ? 'border-purple-500 bg-purple-50' : 'border-gray-200 hover:border-gray-300'}`}
                             >
                                 <div className="flex items-center space-x-3">
-                                    <span className="text-2xl">🔔</span>
-                                    <div>
-                                        <h3 className="font-medium text-gray-900">Apprise (80+ services)</h3>
-                                        <p className="text-sm text-gray-500">Slack, Discord, Email, Telegram, and many more.</p>
-                                    </div>
+                                    <span className="text-xl">🔔</span>
+                                    <h3 className="font-medium text-gray-900 text-sm">Apprise (80+ services)</h3>
                                 </div>
-                                {selectedProvider === 'apprise' && (
-                                    <div className="mt-3 flex items-center text-sm text-purple-600">
-                                        <Check className="w-4 h-4 mr-1" />Selected
-                                    </div>
-                                )}
                             </button>
                         </div>
                     </div>
                 </div>
+            )}
+
+            {/* Shared Notification Events + Default Priority — applies to both providers */}
+            {(mode === 'standalone' || (mode === 'client' && routingMode !== 'director_only')) && (
+                <SharedNotificationSettings />
             )}
 
             {/* ntfy Configuration */}
@@ -1182,102 +1372,6 @@ export default function Notifications() {
                         </div>
                     )}
 
-                    {destinations.length > 0 && (
-                        <div className="card">
-                            <div className="px-6 py-4 border-b border-gray-200">
-                                <h2 className="text-lg font-medium text-gray-900">Notification Events</h2>
-                                <p className="mt-1 text-sm text-gray-500">Choose which events trigger a notification to your configured destinations.</p>
-                            </div>
-                            <div className="px-6 py-4">
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                    {/* Success */}
-                                    <label className={`flex items-center justify-between p-3 rounded-lg border-2 cursor-pointer transition-colors ${
-                                        enabledEvents.success 
-                                            ? 'border-green-500 bg-green-50' 
-                                            : 'border-gray-200 hover:border-gray-300'
-                                    }`}>
-                                        <div className="flex items-center space-x-3">
-                                            <span className="text-lg">✅</span>
-                                            <div>
-                                                <span className="font-medium text-gray-900">Backup Success</span>
-                                                <p className="text-xs text-gray-500">Notify when backup completes successfully</p>
-                                            </div>
-                                        </div>
-                                        <input
-                                            type="checkbox"
-                                            checked={enabledEvents.success}
-                                            onChange={() => handleToggleEvent('success')}
-                                            className="w-5 h-5 text-green-600 rounded focus:ring-green-500"
-                                        />
-                                    </label>
-
-                                    {/* Failure */}
-                                    <label className={`flex items-center justify-between p-3 rounded-lg border-2 cursor-pointer transition-colors ${
-                                        enabledEvents.failure 
-                                            ? 'border-red-500 bg-red-50' 
-                                            : 'border-gray-200 hover:border-gray-300'
-                                    }`}>
-                                        <div className="flex items-center space-x-3">
-                                            <span className="text-lg">❌</span>
-                                            <div>
-                                                <span className="font-medium text-gray-900">Backup Failed</span>
-                                                <p className="text-xs text-gray-500">Notify when backup fails (recommended)</p>
-                                            </div>
-                                        </div>
-                                        <input
-                                            type="checkbox"
-                                            checked={enabledEvents.failure}
-                                            onChange={() => handleToggleEvent('failure')}
-                                            className="w-5 h-5 text-red-600 rounded focus:ring-red-500"
-                                        />
-                                    </label>
-
-                                    {/* Warning */}
-                                    <label className={`flex items-center justify-between p-3 rounded-lg border-2 cursor-pointer transition-colors ${
-                                        enabledEvents.warning 
-                                            ? 'border-yellow-500 bg-yellow-50' 
-                                            : 'border-gray-200 hover:border-gray-300'
-                                    }`}>
-                                        <div className="flex items-center space-x-3">
-                                            <span className="text-lg">⚠️</span>
-                                            <div>
-                                                <span className="font-medium text-gray-900">Backup Warning</span>
-                                                <p className="text-xs text-gray-500">Notify when backup completes with warnings</p>
-                                            </div>
-                                        </div>
-                                        <input
-                                            type="checkbox"
-                                            checked={enabledEvents.warning}
-                                            onChange={() => handleToggleEvent('warning')}
-                                            className="w-5 h-5 text-yellow-600 rounded focus:ring-yellow-500"
-                                        />
-                                    </label>
-
-                                    {/* Security Alert */}
-                                    <label className={`flex items-center justify-between p-3 rounded-lg border-2 cursor-pointer transition-colors ${
-                                        enabledEvents.security_alert 
-                                            ? 'border-purple-500 bg-purple-50' 
-                                            : 'border-gray-200 hover:border-gray-300'
-                                    }`}>
-                                        <div className="flex items-center space-x-3">
-                                            <span className="text-lg">🚨</span>
-                                            <div>
-                                                <span className="font-medium text-gray-900">Security Alert</span>
-                                                <p className="text-xs text-gray-500">Ransomware/canary file detection (critical)</p>
-                                            </div>
-                                        </div>
-                                        <input
-                                            type="checkbox"
-                                            checked={enabledEvents.security_alert}
-                                            onChange={() => handleToggleEvent('security_alert')}
-                                            className="w-5 h-5 text-purple-600 rounded focus:ring-purple-500"
-                                        />
-                                    </label>
-                                </div>
-                            </div>
-                        </div>
-                    )}
-
                     {destinations.length === 0 && (
                         <div className="card">
                             <div className="p-12 text-center">
@@ -1379,7 +1473,7 @@ export default function Notifications() {
                             <div>
                                 <h3 className="text-lg font-semibold text-gray-900 mb-2">Client Mode Routing</h3>
                                 <ul className="space-y-2 text-sm text-gray-600">
-                                    <li className="flex items-start"><Server className="w-4 h-4 mr-2 mt-0.5 text-gray-400" /><span><strong>Director Only:</strong> All notifications go to the Director server</span></li>
+                                    <li className="flex items-start"><Server className="w-4 h-4 mr-2 mt-0.5 text-gray-400" /><span><strong>Borgmatic UI Director only:</strong> All notifications go to the Director server</span></li>
                                     <li className="flex items-start"><Monitor className="w-4 h-4 mr-2 mt-0.5 text-gray-400" /><span><strong>Local Only:</strong> Notifications are sent directly from this client</span></li>
                                     <li className="flex items-start"><Zap className="w-4 h-4 mr-2 mt-0.5 text-gray-400" /><span><strong>Both:</strong> Redundant notifications to both destinations</span></li>
                                 </ul>

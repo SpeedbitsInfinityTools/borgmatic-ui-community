@@ -16,6 +16,7 @@ import WizardStepRepositories from './wizard/WizardStepRepositories';
 import WizardStepScripts from './wizard/WizardStepScripts';
 import WizardStepAdvanced from './wizard/WizardStepAdvanced';
 import WizardModals from './wizard/WizardModals';
+import QuickAddScheduleModal from './wizard/QuickAddScheduleModal';
 
 type WizardMode = 'production' | 'template' | 'from-template';
 
@@ -35,6 +36,7 @@ const BackupWizard: React.FC<BackupWizardProps> = ({
   templateData
 }) => {
   const w = useBackupWizard({ onClose, onSuccess, editBackup, mode, templateData });
+  const [showQuickSchedule, setShowQuickSchedule] = React.useState(false);
 
   return (
     <div className="fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center z-50 p-4">
@@ -160,18 +162,29 @@ const BackupWizard: React.FC<BackupWizardProps> = ({
               ) : (
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">Schedule (Optional)</label>
-                  <select
-                    value={w.formData.schedule_id || ''}
-                    onChange={(e) => w.setFormData({ ...w.formData, schedule_id: e.target.value || null })}
-                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white"
-                  >
-                    <option value="">No schedule (manual only)</option>
-                    {w.schedules.map((schedule: any) => (
-                      <option key={schedule.id} value={schedule.id}>
-                        {schedule.name} - {schedule.cron_expression}
-                      </option>
-                    ))}
-                  </select>
+                  <div className="flex gap-2">
+                    <select
+                      value={w.formData.schedule_id || ''}
+                      onChange={(e) => w.setFormData({ ...w.formData, schedule_id: e.target.value || null })}
+                      className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white"
+                    >
+                      <option value="">No schedule (manual only)</option>
+                      {w.schedules.map((schedule: any) => (
+                        <option key={schedule.id} value={schedule.id}>
+                          {schedule.name} - {schedule.cron_expression}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => setShowQuickSchedule(true)}
+                      className="flex items-center gap-1 px-3 py-2 text-sm text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-lg transition-colors flex-shrink-0"
+                      title="Create a new schedule without leaving this wizard"
+                    >
+                      <Plus className="w-4 h-4" />
+                      <span>Add Schedule</span>
+                    </button>
+                  </div>
                   <p className="mt-1 text-sm text-gray-500">⚠️ Backups without a schedule will be created as inactive</p>
                 </div>
               )}
@@ -422,6 +435,12 @@ const BackupWizard: React.FC<BackupWizardProps> = ({
         showRetentionModal={w.showRetentionModal} setShowRetentionModal={w.setShowRetentionModal}
         customRetention={w.customRetention} setCustomRetention={w.setCustomRetention}
         createRetentionMutation={w.createRetentionMutation}
+      />
+
+      <QuickAddScheduleModal
+        isOpen={showQuickSchedule}
+        onClose={() => setShowQuickSchedule(false)}
+        onCreated={(id) => w.setFormData({ ...w.formData, schedule_id: id })}
       />
     </div>
   );

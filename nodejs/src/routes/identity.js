@@ -876,9 +876,58 @@ router.post('/validate-client-token', async (req, res) => {
         }
 
         const clientToken = req.body.connection_token || '';
+        const clientId = (req.body.client_id || '').trim();
         const directorToken = identity.connection_token || '';
 
-        // If director has no token set, allow any client (open access mode)
+        // If director has no token set, allow any client (open access mode).
+        // We still try the per-client check below for completeness, but no
+        // token at all means anyone may join.
+        if (!directorToken && !clientId) {
+            return res.json({
+                success: true,
+                data: {
+                    message: 'Director is in open access mode - no token required',
+                    open_access: true
+                }
+            });
+        }
+
+        // Layered token model (mirrors handleClientRegistration in
+        // director-server.js):
+        //   • If the caller supplied a client_id AND we have a record for it
+        //     with a per_client_token, that is the ONLY valid token (so admins
+        //     can rotate one client without affecting others).
+        //   • Otherwise fall back to the global bootstrap token.
+        if (clientId) {
+            try {
+                const path = require('path');
+                const fs = require('fs-extra');
+                const directorServer = require('../services/director-server');
+                const clientFile = path.join(directorServer.clientsDir, `${clientId}.json`);
+                if (await fs.pathExists(clientFile)) {
+                    const record = await fs.readJson(clientFile);
+                    if (record.per_client_token) {
+                        if (clientToken === record.per_client_token) {
+                            return res.json({
+                                success: true,
+                                data: {
+                                    message: 'Per-client token is valid',
+                                    open_access: false,
+                                    token_kind: 'per_client'
+                                }
+                            });
+                        }
+                        return res.status(401).json({
+                            success: false,
+                            detail: 'Per-client token does not match. The administrator may have rotated it - copy the new token from Director > Clients > Rotate token.'
+                        });
+                    }
+                }
+            } catch (lookupErr) {
+                console.warn('Per-client token lookup failed, falling back to bootstrap:', lookupErr.message);
+            }
+        }
+
         if (!directorToken) {
             return res.json({
                 success: true,
@@ -889,18 +938,17 @@ router.post('/validate-client-token', async (req, res) => {
             });
         }
 
-        // Check if tokens match
         if (clientToken === directorToken) {
             return res.json({
                 success: true,
                 data: {
-                    message: 'Connection token is valid',
-                    open_access: false
+                    message: 'Bootstrap connection token is valid',
+                    open_access: false,
+                    token_kind: 'bootstrap'
                 }
             });
         }
 
-        // Token mismatch
         return res.status(401).json({
             success: false,
             detail: 'Invalid connection token. Please check the token and try again.'
@@ -1002,9 +1050,16 @@ router.post('/test-connection', authenticateToken, requireAdmin, async (req, res
 
         await healthCheck;
 
-        // Step 2: Validate the connection token with Director
+        // Step 2: Validate the connection token with Director.
+        // Send our client_id too so the director can match against any
+        // per-client token it may have minted/rotated for us. Falling back
+        // to the global bootstrap token check happens automatically on the
+        // director side when no per-client token exists yet.
         const tokenCheck = new Promise((resolve, reject) => {
-            const postData = JSON.stringify({ connection_token: testToken });
+            const postData = JSON.stringify({
+                connection_token: testToken,
+                client_id: identity.client_id
+            });
 
             const options = {
                 hostname: parsedUrl.hostname,

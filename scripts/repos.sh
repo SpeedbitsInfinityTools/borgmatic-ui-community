@@ -564,6 +564,114 @@ run_git() {
 }
 
 # ============================================================================
+# DISK SPACE GUARD
+# ============================================================================
+#
+# Aborts the backup early if free space on the target (or staging) volume
+# drops below BORGMATIC_GIT_MIN_FREE_PERCENT (default: 10 %). Without this
+# guard a single oversized repository can fill the device 100 %, which then
+# breaks every subsequent clone partway through and (in some setups) makes
+# the host itself unhealthy. With the guard you get a clean, loud error
+# instead of a silent disk-full cascade.
+#
+# Override at run time:
+#   BORGMATIC_GIT_MIN_FREE_PERCENT=5   # only abort below 5 % free
+#   BORGMATIC_GIT_MIN_FREE_PERCENT=0   # disable the check entirely
+#
+# Accepts either plain integers ("10") or percentage-style values ("10%").
+# If input is malformed, we fall back to a safe default (10) instead of
+# letting bash arithmetic behave unexpectedly.
+RAW_GIT_MIN_FREE_PERCENT="${BORGMATIC_GIT_MIN_FREE_PERCENT:-10}"
+if [[ "$RAW_GIT_MIN_FREE_PERCENT" =~ ^[0-9]+%?$ ]]; then
+  GIT_MIN_FREE_PERCENT="${RAW_GIT_MIN_FREE_PERCENT%\%}"
+else
+  echo "Warning: Invalid BORGMATIC_GIT_MIN_FREE_PERCENT='$RAW_GIT_MIN_FREE_PERCENT'; using default 10%." >&2
+  GIT_MIN_FREE_PERCENT="10"
+fi
+
+# Keep threshold in a sane range.
+if (( GIT_MIN_FREE_PERCENT < 0 || GIT_MIN_FREE_PERCENT > 100 )); then
+  echo "Warning: BORGMATIC_GIT_MIN_FREE_PERCENT='$GIT_MIN_FREE_PERCENT' out of range (0-100); using default 10%." >&2
+  GIT_MIN_FREE_PERCENT="10"
+fi
+
+# Format a kilobyte count as a short human-readable string.
+_format_kb_human() {
+  awk -v k="$1" 'BEGIN {
+    split("KB MB GB TB PB", u);
+    i = 1;
+    while (k >= 1024 && i < 5) { k /= 1024; i++ }
+    printf "%.1f %s", k, u[i];
+  }'
+}
+
+# Verify free disk space on the volume backing $1.
+# Args:   $1 = directory path; $2 = label used in the error message (optional)
+# Returns 0 if free >= threshold (or check skipped/unavailable), exits the
+# whole script with status 1 if the volume is below the threshold so borgmatic
+# treats the before-hook as failed.
+check_disk_space() {
+  local dir="$1"
+  local label="${2:-target}"
+
+  # Threshold of 0 disables the guard entirely.
+  if [[ "${GIT_MIN_FREE_PERCENT}" -le 0 ]]; then
+    return 0
+  fi
+
+  if ! command -v df >/dev/null 2>&1; then
+    return 0  # df not installed; nothing we can do, don't false-alarm
+  fi
+
+  # Walk up to the nearest existing ancestor — df can't stat a path that
+  # doesn't exist yet (we may be called before the parent is created).
+  local probe="$dir"
+  while [[ -n "$probe" && ! -e "$probe" ]]; do
+    probe="$(dirname "$probe")"
+    [[ "$probe" == "/" ]] && break
+  done
+  [[ -z "$probe" ]] && probe="/"
+
+  local df_line
+  if ! df_line=$(df -P -k "$probe" 2>/dev/null | awk 'NR==2 {print $2, $3, $4}'); then
+    return 0  # df failed (e.g. unmounted FUSE); skip rather than guess
+  fi
+
+  local total used avail
+  read -r total used avail <<<"$df_line"
+  if [[ -z "$total" || "$total" -le 0 ]]; then
+    return 0
+  fi
+
+  local free_pct=$(( avail * 100 / total ))
+  if (( free_pct < GIT_MIN_FREE_PERCENT )); then
+    local avail_h total_h
+    avail_h=$(_format_kb_human "$avail")
+    total_h=$(_format_kb_human "$total")
+    cat >&2 <<EOF
+
+================================================================================
+ERROR: Low disk space on ${label} (${probe})
+  Free:      ${avail_h} of ${total_h}  (${free_pct}%)
+  Threshold: ${GIT_MIN_FREE_PERCENT}% free required
+
+The Git backup has been aborted to avoid filling the disk completely.
+Free up space, point the target at a larger volume, or change the threshold:
+
+  BORGMATIC_GIT_MIN_FREE_PERCENT=5   # be more permissive
+  BORGMATIC_GIT_MIN_FREE_PERCENT=0   # disable the check (not recommended)
+
+If the staging directory is the bottleneck, point it elsewhere with:
+  BORGMATIC_GIT_STAGE_DIR=/path/with/space
+================================================================================
+EOF
+    exit 1
+  fi
+
+  return 0
+}
+
+# ============================================================================
 # TARGET FILESYSTEM PROBE
 # ============================================================================
 #
@@ -705,7 +813,9 @@ backup_git_repo() {
     fi
     
     echo "Updating: $group / $repo_name"
-    
+
+    check_disk_space "$repo_dir" "target"
+
     # Update remote URL if using URL auth
     [[ "$auth_method" != "header" ]] && git -C "$repo_dir" remote set-url origin "$auth_url"
     
@@ -783,6 +893,7 @@ backup_git_repo() {
 
     if [[ "$probe_result" == "ok" ]]; then
       # Direct clone into the target (POSIX-compliant filesystem).
+      check_disk_space "$parent_dir" "target"
       if [[ "$BACKUP_TYPE" == "mirror" ]]; then
         if ! run_git "$use_header_auth" clone --mirror "$auth_url" "$repo_dir"; then
           echo "ERROR: Clone failed for $repo_name"
@@ -825,6 +936,10 @@ backup_git_repo() {
       track_failure "$group/$repo_name" "staging parent not writable"
       return
     fi
+    # Both volumes must have headroom: staging holds the entire clone before
+    # the tar-pipe, then the target needs the same again.
+    check_disk_space "$stage_parent" "staging area"
+    check_disk_space "$parent_dir" "target"
     if ! stage_dir=$(mktemp -d "${stage_parent}/borgmatic-git-clone-XXXXXX"); then
       echo "ERROR: Cannot create staging directory in: $stage_parent"
       track_failure "$group/$repo_name" "staging dir create failed"

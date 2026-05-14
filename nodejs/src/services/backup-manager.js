@@ -58,6 +58,7 @@ class BackupManager {
     _extractMssqlSourcesFromHooks(config) { return hookEx.extractMssqlSourcesFromHooks(config); }
     _extractDbDumpSourcesFromHooks(config) { return hookEx.extractDbDumpSourcesFromHooks(config); }
     _extractGitRepoSourcesFromHooks(config) { return hookEx.extractGitRepoSourcesFromHooks(config); }
+    _extractSshSourcesFromHooks(config) { return hookEx.extractSshSourcesFromHooks(config); }
 
     /**
      * Append a borgmatic 2.x command hook.
@@ -981,8 +982,10 @@ class BackupManager {
 
         // Database configuration - collect password storage promises to await them all
         if (backupData.sources) {
-            const dbSources = backupData.sources.filter(s => s.type !== 'local' && s.type !== 'git_repos');
+            // SSH/SFTP sources are temporary sshfs mounts handled separately below.
+            const dbSources = backupData.sources.filter(s => s.type !== 'local' && s.type !== 'git_repos' && s.type !== 'ssh');
             const gitSources = backupData.sources.filter(s => s.type === 'git_repos');
+            const sshSources = backupData.sources.filter(s => s.type === 'ssh');
             const passwordPromises = [];
             const dumpBaseDir = await this._getDumpBaseDir();
             for (let i = 0; i < dbSources.length; i++) {
@@ -997,6 +1000,17 @@ class BackupManager {
                     backupId: backupData.id,
                     gitIndex: i,
                     backupName: backupData.name,
+                });
+                if (promise) passwordPromises.push(promise);
+            }
+
+            // SSH/SFTP sources — temporary sshfs mount via before/after/on_error hooks.
+            // The mount must succeed or the backup fails loudly; cleanup runs even on
+            // failure so the host doesn't accumulate stale mount points or key tmpfiles.
+            for (let i = 0; i < sshSources.length; i++) {
+                const promise = this.addSshSourceConfig(config, sshSources[i], {
+                    backupId: backupData.id,
+                    sshIndex: i,
                 });
                 if (promise) passwordPromises.push(promise);
             }
@@ -1460,6 +1474,167 @@ bash "$REPOS_SH" --job=${jobFilePathQ} --backup --yes`;
             before: 'action',
             when: ['create'],
             run: [hookScript],
+        });
+
+        return storagePromise;
+    }
+
+    /**
+     * Add an SSH/SFTP source to the borgmatic config.
+     *
+     * Borg can only back up local paths, so we mount the remote folder via
+     * sshfs in a `before: 'action'` hook, append the local mount point to
+     * source_directories, and unmount in `after: 'action'` and on errors.
+     *
+     * Failure modes:
+     *   - If the mount fails the before-hook exits non-zero (set -euo
+     *     pipefail + explicit `mountpoint -q` verification), borgmatic
+     *     aborts the action, and the user gets a loud failure in the run
+     *     log. We never silently skip files.
+     *
+     * Credential handling:
+     *   - For key auth, the SSH key plaintext is injected as
+     *     BORGMATIC_UI_SSHKEY_<safeBackup>_<sshIndex> by backup-executor.js.
+     *     The key id is carried in the metadata marker and resolved against
+     *     the encrypted ssh-keys.yaml store on demand.
+     *   - For password auth, the password is stored in the password-manager
+     *     vault keyed by BORGMATIC_UI_SSHPASS_<safeBackup>_<sshIndex> and
+     *     loaded the same way.
+     *
+     * @returns {Promise|null} Promise for password storage operation, or null.
+     */
+    addSshSourceConfig(config, source, opts = {}) {
+        const sshfsHelpers = require('./sshfs-helpers');
+
+        const backupId = opts.backupId || 'unknown';
+        const sshIndex = Number.isInteger(opts.sshIndex) ? opts.sshIndex : 0;
+        const safeBackup = String(backupId).replace(/[^A-Za-z0-9_]/g, '_');
+
+        const host = String(source.host || '').trim();
+        const username = String(source.username || '').trim();
+        const remotePath = String(source.remote_path || '').trim();
+        const port = Number.isInteger(source.port) ? source.port : 22;
+        const authMethod = source.auth_method === 'password' ? 'password' : 'key';
+        const customMountOptions = String(source.mount_options || '').trim();
+
+        if (!host) {
+            throw new Error(`SSH source #${sshIndex + 1}: hostname is required`);
+        }
+        if (!username) {
+            throw new Error(`SSH source #${sshIndex + 1}: username is required`);
+        }
+        if (!remotePath) {
+            throw new Error(`SSH source #${sshIndex + 1}: remote path is required`);
+        }
+        if (authMethod === 'key' && !source.ssh_key_id) {
+            throw new Error(`SSH source #${sshIndex + 1}: an SSH key must be selected for key authentication`);
+        }
+        if (authMethod === 'password' && !source.ssh_password) {
+            // Password may already be a placeholder if we're rebuilding from
+            // an extracted source; only flag missing on truly empty values.
+            const looksLikePlaceholder = typeof source.ssh_password === 'string'
+                && /^\$\{BORGMATIC_UI_SSHPASS_[A-Za-z0-9_]+\}$/.test(source.ssh_password);
+            if (!looksLikePlaceholder) {
+                throw new Error(`SSH source #${sshIndex + 1}: an SSH password is required for password authentication`);
+            }
+        }
+
+        const mountPoint = sshfsHelpers.buildMountPoint(safeBackup, sshIndex);
+
+        // Append mount point to source_directories so borgmatic backs up
+        // the contents of the mount once it's live.
+        config.source_directories = config.source_directories || [];
+        if (!config.source_directories.includes(mountPoint)) {
+            config.source_directories.push(mountPoint);
+        }
+
+        // Build env-var names keyed by backup+source index. We do this for both
+        // key and password auth to avoid lossy key-id normalization problems
+        // with UUIDs (hyphens are not valid in env-var names).
+        const keyEnvVar = authMethod === 'key'
+            ? `BORGMATIC_UI_SSHKEY_${safeBackup}_${sshIndex}`
+            : null;
+        const passwordEnvVar = authMethod === 'password'
+            ? `BORGMATIC_UI_SSHPASS_${safeBackup}_${sshIndex}`
+            : null;
+        const keyTmpFile = authMethod === 'key'
+            ? `/tmp/borgmatic-sshfs-key-${safeBackup}-${sshIndex}`
+            : null;
+
+        // Persist password to the vault if we got plaintext from the wizard.
+        let storagePromise = null;
+        if (authMethod === 'password') {
+            const pw = source.ssh_password;
+            const looksLikePlaceholder = typeof pw === 'string'
+                && /^\$\{BORGMATIC_UI_SSHPASS_[A-Za-z0-9_]+\}$/.test(pw);
+            if (typeof pw === 'string' && pw.length > 0 && !looksLikePlaceholder) {
+                const passwordManager = require('./password-manager');
+                storagePromise = passwordManager.storeDatabaseCredentials(passwordEnvVar, 'ssh_source', {
+                    password: pw,
+                    hostname: host,
+                    username: username,
+                }).catch((e) => {
+                    console.warn(`⚠️ Could not store SSH password for ${passwordEnvVar}:`, e.message);
+                });
+            }
+        }
+
+        // Build the metadata payload that round-trips the wizard fields.
+        // Secrets are referenced only by env-var name / key id — never embedded.
+        const metadata = {
+            type: 'ssh',
+            host,
+            port,
+            username,
+            auth_method: authMethod,
+            ssh_key_id: authMethod === 'key' ? (source.ssh_key_id ?? null) : null,
+            ssh_key_env_var: authMethod === 'key' ? keyEnvVar : null,
+            ssh_password_env_var: authMethod === 'password' ? passwordEnvVar : null,
+            remote_path: remotePath,
+            mount_point: mountPoint,
+            key_tmpfile: keyTmpFile,
+            mount_options: customMountOptions || null,
+            exclude_patterns: Array.isArray(source.exclude_patterns) ? source.exclude_patterns : [],
+        };
+        const metadataB64 = Buffer.from(JSON.stringify(metadata)).toString('base64');
+
+        // Optional per-source mount options, comma-separated. Falls back to
+        // sshfs-helpers.defaultMountOptions() when empty.
+        const mountOptions = customMountOptions
+            ? customMountOptions.split(',').map((s) => s.trim()).filter(Boolean)
+            : undefined;
+
+        const mountScript = sshfsHelpers.buildSshfsMountScript({
+            mountPoint,
+            host,
+            port,
+            username,
+            remotePath,
+            authMethod,
+            keyEnvVar,
+            keyTmpFile,
+            passwordEnvVar,
+            mountOptions,
+            metadataB64,
+        });
+
+        const umountScript = sshfsHelpers.buildSshfsUmountScript({ mountPoint, keyTmpFile });
+
+        // before-hook: mount and verify. on_error AND after both run umount
+        // so we always release the mount and clean up the key tmpfile.
+        this._appendCommandHook(config, {
+            before: 'action',
+            when: ['create'],
+            run: [mountScript],
+        });
+        this._appendCommandHook(config, {
+            after: 'action',
+            when: ['create'],
+            run: [umountScript],
+        });
+        this._appendCommandHook(config, {
+            after: 'error',
+            run: [umountScript],
         });
 
         return storagePromise;

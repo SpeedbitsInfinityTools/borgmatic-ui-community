@@ -961,65 +961,74 @@ function registerClientCommandHandlers(directorClient) {
     // Get authService reference for token generation (must be at module level)
     const authServiceModule = require('./services/auth');
 
-    // API Proxy - forwards HTTP requests from Director to local API
+    // API Proxy - forwards HTTP requests from Director to local API.
+    // Returns { status, headers, body, isBase64 } so the director-side middleware can
+    // faithfully replay the response with the original content-type. Binary responses are
+    // base64-encoded so they survive socket.io's JSON serialization.
     directorClient.registerCommandHandler('api:proxy', async (params) => {
         const http = require('http');
-        const { method, path, body, query, headers } = params;
+        const { method, path, body, headers } = params;
 
         console.log(`📥 CLIENT: Received api:proxy command - ${method} ${path}`);
 
         return new Promise((resolve) => {
             try {
-                // Generate a local token for internal API calls
-                // The Director's token won't work because JWT secrets are different
-                debugLog(`🔐 CLIENT: Generating local token for authentication`);
-                debugLog(`🔍 DEBUG: authService type: ${typeof authServiceModule}, has createAccessToken: ${typeof authServiceModule.createAccessToken}`);
+                // Director's JWT secret is not ours — mint a local one tied to admin.
+                debugLog(`🔐 CLIENT: Generating local token for tunneled request`);
                 const localToken = authServiceModule.createAccessToken({ sub: 'admin' });
-                // Never log token values
                 debugLog(`✅ CLIENT: Local token generated`);
 
-                // Verify the token can be decoded
-                const decoded = authServiceModule.verifyToken(localToken);
-                // Avoid logging token payloads as they may contain sensitive claims
-                debugLog(`🔍 DEBUG: Token verification result: ${decoded ? 'VALID' : 'INVALID'}`);
+                // Forward a curated subset of headers from the original request. We must NOT
+                // forward the director's Authorization header (different JWT secret) and we
+                // must NOT forward host/connection/content-length (computed by node http).
+                const HOP_BY_HOP = new Set([
+                    'authorization', 'host', 'connection', 'content-length', 'cookie',
+                    'transfer-encoding', 'keep-alive', 'upgrade', 'x-remote-client-id',
+                    'x-internal-proxy', 'x-api-key'
+                ]);
+                const forwardHeaders = {};
+                for (const [k, v] of Object.entries(headers || {})) {
+                    if (!HOP_BY_HOP.has(k.toLowerCase())) forwardHeaders[k] = v;
+                }
+                forwardHeaders['authorization'] = `Bearer ${localToken}`;
+                forwardHeaders['content-type'] = forwardHeaders['content-type'] || (headers?.['content-type']) || 'application/json';
+                forwardHeaders['x-internal-proxy'] = 'true';
 
-                // Prepare request options
                 const options = {
-                    hostname: 'localhost',
+                    hostname: '127.0.0.1',
                     port: config.port,
                     path: path,
                     method: method,
-                    headers: {
-                        'authorization': `Bearer ${localToken}`,
-                        'content-type': headers?.['content-type'] || 'application/json',
-                        'x-internal-proxy': 'true'  // Flag to bypass session validation
-                    }
+                    headers: forwardHeaders
                 };
 
-                console.log(`🔄 CLIENT: Making local API call to port ${config.port}: ${method} ${path}`);
+                console.log(`🔄 CLIENT: Tunneling local API call to port ${config.port}: ${method} ${path}`);
 
                 const req = http.request(options, (res) => {
-                    let data = '';
-
-                    res.on('data', (chunk) => {
-                        data += chunk;
-                    });
-
+                    const chunks = [];
+                    res.on('data', (chunk) => chunks.push(chunk));
                     res.on('end', () => {
                         try {
-                            // Try to parse JSON response
-                            const parsedData = data ? JSON.parse(data) : {};
-                            console.log(`✅ Proxied request completed: ${method} ${path} -> ${res.statusCode}`);
+                            const buf = Buffer.concat(chunks);
+                            const ct = String(res.headers['content-type'] || '').toLowerCase();
+                            // Treat anything that isn't text/json/xml/form as binary so we can
+                            // safely round-trip through socket.io's JSON channel.
+                            const isText = /^(text\/|application\/(json|xml|x-www-form-urlencoded|javascript)|application\/.+\+(json|xml))/.test(ct);
+                            const body = isText ? buf.toString('utf8') : buf.toString('base64');
+                            console.log(`✅ Proxied: ${method} ${path} -> ${res.statusCode} (${isText ? 'text' : 'binary'})`);
                             resolve({
                                 status: res.statusCode,
-                                data: parsedData
+                                headers: res.headers,
+                                body,
+                                isBase64: !isText
                             });
                         } catch (err) {
-                            // If not JSON, return raw data
-                            console.log(`✅ Proxied request completed (non-JSON): ${method} ${path} -> ${res.statusCode}`);
+                            console.error('Failed to assemble proxy response:', err.message);
                             resolve({
-                                status: res.statusCode,
-                                data: data
+                                status: 500,
+                                headers: { 'content-type': 'application/json' },
+                                body: JSON.stringify({ success: false, detail: `Proxy assembly error: ${err.message}` }),
+                                isBase64: false
                             });
                         }
                     });
@@ -1029,27 +1038,23 @@ function registerClientCommandHandlers(directorClient) {
                     console.error('API proxy error:', error.message);
                     resolve({
                         status: 500,
-                        data: {
-                            success: false,
-                            detail: `Local API error: ${error.message}`
-                        }
+                        headers: { 'content-type': 'application/json' },
+                        body: JSON.stringify({ success: false, detail: `Local API error: ${error.message}` }),
+                        isBase64: false
                     });
                 });
 
-                // Send request body if present
                 if (body && method !== 'GET' && method !== 'HEAD') {
                     req.write(typeof body === 'string' ? body : JSON.stringify(body));
                 }
-
                 req.end();
             } catch (error) {
                 console.error('API proxy setup error:', error.message);
                 resolve({
                     status: 500,
-                    data: {
-                        success: false,
-                        detail: `API proxy error: ${error.message}`
-                    }
+                    headers: { 'content-type': 'application/json' },
+                    body: JSON.stringify({ success: false, detail: `API proxy error: ${error.message}` }),
+                    isBase64: false
                 });
             }
         });

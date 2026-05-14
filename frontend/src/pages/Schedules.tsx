@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import { scheduleAPI } from '../services/api';
-import { Clock, Plus, Pencil, Trash2, X, Wand2 } from 'lucide-react';
+import { Clock, Plus, Pencil, Trash2, X, Wand2, LayoutGrid, List } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { formatDate } from '../utils/dateFormat';
 import CronBuilder from '../components/CronBuilder';
@@ -20,6 +20,8 @@ const Schedules: React.FC = () => {
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [editingSchedule, setEditingSchedule] = useState<Schedule | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
+  // In-memory only — matches the Backups page pattern (no localStorage).
+  const [viewMode, setViewMode] = useState<'cards' | 'list'>('cards');
 
   // Fetch schedules
   const { data: schedulesData, isLoading } = useQuery('schedules', async () => {
@@ -97,13 +99,40 @@ const Schedules: React.FC = () => {
             Manage cron schedules that can be assigned to backups
           </p>
         </div>
-        <button
-          onClick={() => setIsCreateModalOpen(true)}
-          className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-        >
-          <Plus className="w-5 h-5" />
-          <span>Create Schedule</span>
-        </button>
+        <div className="flex items-center space-x-3">
+          {/* View Mode Toggle — only when there is something to view, mirroring Backups */}
+          {schedules.length > 0 && (
+            <div className="flex items-center bg-gray-100 rounded-lg p-1">
+              <button
+                onClick={() => setViewMode('cards')}
+                className={`p-2 rounded-md transition-colors ${viewMode === 'cards'
+                  ? 'bg-white text-blue-600 shadow-sm'
+                  : 'text-gray-500 hover:text-gray-700'
+                  }`}
+                title="Card view"
+              >
+                <LayoutGrid className="w-4 h-4" />
+              </button>
+              <button
+                onClick={() => setViewMode('list')}
+                className={`p-2 rounded-md transition-colors ${viewMode === 'list'
+                  ? 'bg-white text-blue-600 shadow-sm'
+                  : 'text-gray-500 hover:text-gray-700'
+                  }`}
+                title="List view"
+              >
+                <List className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+          <button
+            onClick={() => setIsCreateModalOpen(true)}
+            className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+          >
+            <Plus className="w-5 h-5" />
+            <span>Create Schedule</span>
+          </button>
+        </div>
       </div>
 
       {isLoading ? (
@@ -117,6 +146,74 @@ const Schedules: React.FC = () => {
           <p className="mt-1 text-sm text-gray-500">
             Get started by creating a new schedule.
           </p>
+        </div>
+      ) : viewMode === 'list' ? (
+        <div className="bg-white rounded-lg border shadow-sm overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Cron Expression</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Description</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Created</th>
+                  <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-200">
+                {schedules.map((schedule) => (
+                  <tr key={schedule.id} className="hover:bg-gray-50">
+                    <td className="px-4 py-2 whitespace-nowrap">
+                      <div className="flex items-center space-x-2">
+                        <Clock className="w-4 h-4 text-blue-600 flex-shrink-0" />
+                        <div className="text-sm font-medium text-gray-900">{schedule.name}</div>
+                      </div>
+                    </td>
+                    <td className="px-4 py-2 whitespace-nowrap">
+                      <code className="text-xs font-mono text-gray-900 bg-gray-50 px-2 py-1 rounded border border-gray-200">
+                        {schedule.cron_expression}
+                      </code>
+                    </td>
+                    <td className="px-4 py-2 text-sm text-gray-700">
+                      {schedule.description ? (
+                        <span className="block max-w-md truncate" title={schedule.description}>
+                          {schedule.description}
+                        </span>
+                      ) : (
+                        <span className="text-gray-400">—</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-700">
+                      {formatDate(schedule.created_at)}
+                    </td>
+                    <td className="px-4 py-2 whitespace-nowrap text-right">
+                      <div className="flex items-center justify-end space-x-2">
+                        <button
+                          onClick={() => setEditingSchedule(schedule)}
+                          className="inline-flex items-center px-2 py-1 text-xs font-medium text-blue-600 hover:bg-blue-50 rounded transition-colors"
+                          title="Edit"
+                        >
+                          <Pencil className="w-3.5 h-3.5 mr-1" />
+                          Edit
+                        </button>
+                        <button
+                          onClick={() => handleDelete(schedule.id)}
+                          className={`inline-flex items-center px-2 py-1 text-xs font-medium rounded transition-colors ${deleteConfirm === schedule.id
+                            ? 'bg-red-600 text-white hover:bg-red-700'
+                            : 'text-red-600 hover:bg-red-50'
+                            }`}
+                          title="Delete"
+                        >
+                          <Trash2 className="w-3.5 h-3.5 mr-1" />
+                          {deleteConfirm === schedule.id ? 'Confirm?' : 'Delete'}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">

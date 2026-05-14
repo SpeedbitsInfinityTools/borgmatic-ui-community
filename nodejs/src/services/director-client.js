@@ -353,18 +353,21 @@ class DirectorClient {
             this.authFailureCount = 0;
             this.lastAuthFailure = null;
 
-            // Don't update connection_token - it's set by user and should not change
-            // Just update last_connected timestamp
-            await identityManager.updateIdentity({
-                last_connected: new Date().toISOString()
-            });
+            // Layered token model: when the director mints a fresh per-client token (sent
+            // only on first successful auth, or after an admin rotates it), persist it as
+            // our connection_token. From here on we register with this dedicated secret
+            // instead of the global bootstrap, so a future rotation by the admin only
+            // affects this client.
+            const updates = { last_connected: new Date().toISOString() };
+            if (data && typeof data.per_client_token === 'string' && data.per_client_token.length > 0) {
+                updates.connection_token = data.per_client_token;
+                console.log('🔐 Saved per-client token issued by director');
+            }
+            await identityManager.updateIdentity(updates);
 
             this.isAuthenticated = true;
 
-            // Start heartbeat
             this.startHeartbeat();
-
-            // Emit initial status
             this.sendStatus();
         } catch (error) {
             console.error('Failed to handle auth approval:', error.message);
@@ -557,25 +560,83 @@ class DirectorClient {
 
     /**
      * Get current client status
+     *
+     * Counts and last-backup info MUST match what the user sees in the local
+     * client UI:
+     *   - backups_count: user-visible backups only (excludes internal
+     *     git-job-* / git-keys-* helper configs that backup-manager hides).
+     *   - repos_count: unique repositories (used + unused), not occurrences.
+     *   - last_backup_event: derived from the most recent run recorded in
+     *     backups-metadata.yaml so the director shows real history even if
+     *     no live notification has been pushed since it (re)started.
      */
     async getStatus() {
-        try {
-            // Use lazy loading to avoid circular dependencies
-            const configParserService = this._getConfigParser();
-            const state = configParserService.getCurrentState();
+        const status = {
+            backups_count: 0,
+            repos_count: 0,
+            last_backup: null,
+            last_backup_event: null,
+            disk_usage: 0,
+            cpu_usage: 0,
+            memory_usage: 0
+        };
 
-            return {
-                backups_count: state.configs.length,
-                repos_count: state.totalUnusedRepos + state.configs.reduce((sum, c) => sum + c.repositories.length, 0),
-                last_backup: null, // TODO: Get from backup history
-                disk_usage: 0, // TODO: Get actual disk usage
-                cpu_usage: 0, // TODO: Get actual CPU usage
-                memory_usage: 0 // TODO: Get actual memory usage
-            };
+        // Backups count + last-backup summary, sourced from the same service
+        // that powers the user-visible Backups page.
+        try {
+            const backupManager = require('./backup-manager');
+            const backups = await backupManager.getAllBackups();
+            if (Array.isArray(backups)) {
+                status.backups_count = backups.length;
+
+                let latest = null;
+                for (const b of backups) {
+                    if (!b?.last_run) continue;
+                    const ts = Date.parse(b.last_run);
+                    if (!Number.isFinite(ts)) continue;
+                    if (!latest || ts > latest._ts) latest = { ...b, _ts: ts };
+                }
+                if (latest) {
+                    const rawStatus = String(latest.last_run_status || '').toLowerCase();
+                    let severity = 'info';
+                    let event_type = 'backup_completed';
+                    if (rawStatus === 'failed' || rawStatus === 'error') {
+                        severity = 'error';
+                        event_type = 'backup_failed';
+                    } else if (rawStatus === 'running') {
+                        severity = 'info';
+                        event_type = 'backup_running';
+                    } else if (rawStatus === 'success' || rawStatus === 'completed') {
+                        severity = 'info';
+                        event_type = 'backup_completed';
+                    }
+                    status.last_backup = latest.last_run;
+                    status.last_backup_event = {
+                        at: latest.last_run,
+                        event_type,
+                        severity,
+                        backup_name: latest.name || null,
+                        repository: null,
+                        message: `${latest.name || 'Backup'}: ${rawStatus || 'unknown'}`
+                    };
+                }
+            }
         } catch (error) {
-            console.error('Failed to get status:', error.message);
-            return {};
+            console.error('Failed to read backups for heartbeat:', error.message);
         }
+
+        // Unique repositories (used + unused).
+        try {
+            const configParserService = this._getConfigParser();
+            const repos = await configParserService.getAllRepositoriesWithUsage();
+            if (Array.isArray(repos)) {
+                status.repos_count = repos.length;
+            }
+        } catch (error) {
+            console.error('Failed to read repositories for heartbeat:', error.message);
+        }
+
+        return status;
     }
 
     /**

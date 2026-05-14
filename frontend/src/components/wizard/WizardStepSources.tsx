@@ -16,10 +16,12 @@ import {
   ChevronRight,
   X,
   Lock,
+  Server,
 } from 'lucide-react';
 import PathSelectorField from '../PathSelectorField';
 import { gitReposAPI } from '../../services/api';
 import { toast } from 'react-hot-toast';
+import SSHSourceCard from './SSHSourceCard';
 
 const DB_TYPES = ['postgresql', 'mysql', 'mariadb', 'mongodb', 'sqlite', 'mssql'];
 
@@ -30,7 +32,7 @@ export interface WizardStepSourcesProps {
   mode?: string;
   operatingMode: string;
 
-  addSource: (type: 'local' | 'database' | 'git_repos') => void;
+  addSource: (type: 'local' | 'database' | 'git_repos' | 'ssh') => void;
   removeSource: (index: number) => void;
   updateSource: (index: number, field: string, value: any) => void;
   trimSourceField: (index: number, field: string) => void;
@@ -136,9 +138,11 @@ const WizardStepSources: React.FC<WizardStepSourcesProps> = (props) => {
   const localSources = formData.sources.map((s: any, i: number) => ({ source: s, index: i })).filter(({ source }: any) => source.type === 'local');
   const dbSources = formData.sources.map((s: any, i: number) => ({ source: s, index: i })).filter(({ source }: any) => DB_TYPES.includes(source.type));
   const gitSources = formData.sources.map((s: any, i: number) => ({ source: s, index: i })).filter(({ source }: any) => source.type === 'git_repos');
+  const sshSources = formData.sources.map((s: any, i: number) => ({ source: s, index: i })).filter(({ source }: any) => source.type === 'ssh');
   const localCount = localSources.length;
   const dbCount = dbSources.length;
   const gitCount = gitSources.length;
+  const sshCount = sshSources.length;
 
   const sentinelRef = useRef<HTMLDivElement>(null);
   const [isStuck, setIsStuck] = useState(false);
@@ -171,6 +175,16 @@ const WizardStepSources: React.FC<WizardStepSourcesProps> = (props) => {
               <span className={isStuck ? 'hidden sm:inline' : ''}>Add Local Directory</span>
               {localCount > 0 && (
                 <span className="absolute -top-1.5 -right-1.5 bg-amber-500 text-white text-[10px] font-bold rounded-full w-4 h-4 flex items-center justify-center">{localCount}</span>
+              )}
+            </button>
+            <button
+              onClick={() => addSource('ssh')}
+              className={`btn-secondary flex items-center space-x-1 relative transition-all duration-200 ${isStuck ? 'text-xs px-2 py-1' : 'text-sm'}`}
+            >
+              <Server className={`transition-all duration-200 ${isStuck ? 'w-3.5 h-3.5' : 'w-4 h-4'}`} />
+              <span className={isStuck ? 'hidden sm:inline' : ''}>Add SSH/SFTP</span>
+              {sshCount > 0 && (
+                <span className="absolute -top-1.5 -right-1.5 bg-teal-500 text-white text-[10px] font-bold rounded-full w-4 h-4 flex items-center justify-center">{sshCount}</span>
               )}
             </button>
             {!(mode === 'template' && operatingMode === 'director') && (
@@ -265,6 +279,35 @@ const WizardStepSources: React.FC<WizardStepSourcesProps> = (props) => {
                   </button>
                 </div>
               </div>
+            ))}
+          </div>
+        )}
+
+        {/* ── SSH / SFTP Sources Section ── */}
+        {sshCount > 0 && (
+          <div className="border-l-4 border-l-teal-400 pl-3 space-y-2">
+            <div className="flex items-center gap-2">
+              <Server className="w-4 h-4 text-teal-600" />
+              <span className="text-sm font-medium text-teal-800">SSH / SFTP Sources</span>
+              <span className="text-xs text-teal-600 bg-teal-50 px-1.5 py-0.5 rounded">{sshCount}</span>
+            </div>
+            {sshSources.map(({ source, index }: any, pos: number) => (
+              <React.Fragment key={index}>
+                {pos > 0 && (
+                  <div className="flex items-center gap-2 py-1">
+                    <div className="flex-1 border-t border-teal-200" />
+                    <span className="text-[10px] text-teal-400 font-medium">SSH {pos + 1} of {sshCount}</span>
+                    <div className="flex-1 border-t border-teal-200" />
+                  </div>
+                )}
+                <SSHSourceCard
+                  source={source}
+                  index={index}
+                  updateSource={updateSource}
+                  trimSourceField={trimSourceField}
+                  removeSource={removeSource}
+                />
+              </React.Fragment>
             ))}
           </div>
         )}

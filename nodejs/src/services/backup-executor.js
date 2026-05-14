@@ -350,21 +350,21 @@ class BackupExecutor {
             }
 
             // Inject credentials from password-manager (encrypted at rest).
-            // Scan the YAML for env-var placeholders (DB passwords + Git PATs) and populate them.
+            // Scan the YAML for env-var placeholders (DB passwords + Git PATs + SSH passwords) and populate them.
             try {
                 const yamlText = await fs.readFile(configPath, 'utf8');
-                // Match both ${VAR} (legacy) and $(printenv VAR) patterns for DB and Git credentials
-                const matches = Array.from(yamlText.matchAll(/(?:\$\{|printenv\s+)(BORGMATIC_UI_(?:DB_PASS|GIT_PAT)_[A-Za-z0-9_]+)/g)).map(m => m[1]);
-                const uniqueEnvVars = Array.from(new Set(matches));
-                
-                if (uniqueEnvVars.length > 0) {
+                // Match both ${VAR} (legacy) and $(printenv VAR) patterns for vault-stored credentials.
+                const vaultMatches = Array.from(yamlText.matchAll(/(?:\$\{|printenv\s+)(BORGMATIC_UI_(?:DB_PASS|GIT_PAT|SSHPASS)_[A-Za-z0-9_]+)/g)).map(m => m[1]);
+                const uniqueVaultVars = Array.from(new Set(vaultMatches));
+
+                if (uniqueVaultVars.length > 0) {
                     const passwordManager = require('./password-manager');
                     let loadedCount = 0;
-                    
-                    for (const varName of uniqueEnvVars) {
+
+                    for (const varName of uniqueVaultVars) {
                         try {
                             const creds = await passwordManager.getDatabaseCredentials(varName);
-                            
+
                             if (creds) {
                                 const pw = creds?.credentials?.password;
                                 if (pw) {
@@ -380,7 +380,48 @@ class BackupExecutor {
                             console.warn(`⚠️  Could not load credentials for ${varName}:`, e.message);
                         }
                     }
-                    console.log(`🔐 Loaded ${loadedCount}/${uniqueEnvVars.length} credential entries from vault`);
+                    console.log(`🔐 Loaded ${loadedCount}/${uniqueVaultVars.length} credential entries from vault`);
+                }
+
+                // SSH source key material is resolved from the metadata marker:
+                // BORGMATIC_UI_SSH_META_B64 contains both ssh_key_id and the
+                // env-var name to populate (ssh_key_env_var).
+                const sshMetaMatches = Array.from(
+                    yamlText.matchAll(/BORGMATIC_UI_SSH_META_B64:([A-Za-z0-9+/=]+)/g)
+                ).map(m => m[1]);
+                const sshKeyLoads = [];
+                for (const encoded of sshMetaMatches) {
+                    try {
+                        const parsed = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
+                        if (parsed?.auth_method !== 'key') continue;
+                        const keyId = parsed?.ssh_key_id;
+                        const keyEnvVar = parsed?.ssh_key_env_var;
+                        if (!keyId || !keyEnvVar || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(String(keyEnvVar))) continue;
+                        sshKeyLoads.push({ keyId: String(keyId), keyEnvVar: String(keyEnvVar) });
+                    } catch (_) {
+                        // Ignore malformed markers from old/broken configs.
+                    }
+                }
+                const uniqueSshKeyLoads = Array.from(
+                    new Map(sshKeyLoads.map((x) => [`${x.keyId}:${x.keyEnvVar}`, x])).values()
+                );
+                if (uniqueSshKeyLoads.length > 0) {
+                    const sshKeysService = require('./ssh-keys');
+                    let loadedSshKeys = 0;
+                    for (const { keyId, keyEnvVar } of uniqueSshKeyLoads) {
+                        try {
+                            const sshKey = await sshKeysService.getSSHKey(keyId);
+                            if (sshKey?.private_key) {
+                                env[keyEnvVar] = sshKey.private_key;
+                                loadedSshKeys++;
+                            } else {
+                                console.warn(`⚠️  SSH key id=${keyId} not found in ssh-keys.yaml — sshfs mount will fail`);
+                            }
+                        } catch (e) {
+                            console.warn(`⚠️  Could not load SSH key id=${keyId}:`, e.message);
+                        }
+                    }
+                    console.log(`🔐 Loaded ${loadedSshKeys}/${uniqueSshKeyLoads.length} SSH keys for sshfs mounts`);
                 }
             } catch (e) {
                 console.warn('⚠️  Could not scan config for credential placeholders:', e.message);

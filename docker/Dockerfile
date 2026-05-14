@@ -99,6 +99,7 @@ RUN apk add --no-cache \
     sed \
     openssh-client \
     sshpass \
+    sshfs \
     bzip2 \
     unzip \
     # su-exec for dropping privileges in entrypoint (Alpine's gosu)

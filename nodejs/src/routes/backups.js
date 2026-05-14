@@ -551,7 +551,17 @@ router.get('/:id/credentials', authenticateToken, requireAdmin, async (req, res)
                 } catch (e) { /* vault entry missing */ }
             }
 
-            if (entry.pat || entry.bb_app_password || entry.password) {
+            if (s.type === 'ssh' && s.ssh_password && /^\$\{BORGMATIC_UI_SSHPASS_/.test(s.ssh_password)) {
+                const envVar = s.ssh_password.replace(/^\$\{/, '').replace(/\}$/, '');
+                try {
+                    const creds = await passwordManager.getDatabaseCredentials(envVar);
+                    if (creds?.credentials?.password) {
+                        entry.ssh_password = creds.credentials.password;
+                    }
+                } catch (e) { /* vault entry missing */ }
+            }
+
+            if (entry.pat || entry.bb_app_password || entry.password || entry.ssh_password) {
                 result.push(entry);
             }
         }

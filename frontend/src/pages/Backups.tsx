@@ -244,8 +244,18 @@ const Backups: React.FC = () => {
         });
       }, 3000);
 
-      // Note: We don't invalidate queries here as SSE will provide real-time updates
-      // Invalidate after backup completes (via SSE event) instead
+      // SSE provides real-time updates, but we cannot rely on it 100 % of the
+      // time (browser tab throttled, SSE max-attempts exhausted, the ring-buffered
+      // events array may have rotated past the `backup_started` event before the
+      // hook recomputed, etc.). The backend writes `last_run_status: 'running'`
+      // synchronously inside `executeBackup()` before broadcasting the SSE event,
+      // so a single delayed refetch reliably promotes the chip out of any stale
+      // "Success" state from the previous run — even when SSE never delivers.
+      // 1500 ms is well past the synchronous metadata write while still feeling
+      // immediate to the user.
+      setTimeout(() => {
+        queryClient.invalidateQueries({ queryKey: ['backups'] });
+      }, 1500);
     },
     onError: (error: any) => {
       console.error('❌ Failed to start backup:', error);
@@ -797,7 +807,19 @@ const Backups: React.FC = () => {
 
                   {/* Last Run Status */}
                   <div className="hidden sm:flex items-center mr-4 w-28">
-                    {backup.last_run ? (
+                    {/*
+                      Live-running state takes priority over the cached
+                      `last_run_status` so a freshly-clicked Run button does
+                      not show stale "Success" from the previous run while
+                      SSE is delivering (or failing to deliver) the
+                      `backup_started` event.
+                    */}
+                    {showSpinner || backup.last_run_status === 'running' ? (
+                      <span className="text-xs px-2 py-1 bg-blue-100 text-blue-700 rounded-full flex items-center">
+                        <RefreshCw className="w-3 h-3 mr-1 animate-spin" />
+                        Running
+                      </span>
+                    ) : backup.last_run ? (
                       backup.last_run_status === 'success' ? (
                         <span className="text-xs px-2 py-1 bg-green-100 text-green-700 rounded-full flex items-center">
                           <CheckCircle className="w-3 h-3 mr-1" />
@@ -807,11 +829,6 @@ const Backups: React.FC = () => {
                         <span className="text-xs px-2 py-1 bg-yellow-100 text-yellow-700 rounded-full flex items-center">
                           <AlertTriangle className="w-3 h-3 mr-1" />
                           Warning
-                        </span>
-                      ) : backup.last_run_status === 'running' ? (
-                        <span className="text-xs px-2 py-1 bg-blue-100 text-blue-700 rounded-full flex items-center">
-                          <RefreshCw className="w-3 h-3 mr-1 animate-spin" />
-                          Running
                         </span>
                       ) : (
                         <span className="text-xs px-2 py-1 bg-red-100 text-red-700 rounded-full flex items-center">
@@ -1372,7 +1389,30 @@ const Backups: React.FC = () => {
                     )}
 
                     {/* Last Run */}
-                    {backup.last_run ? (
+                    {/*
+                      Live-running state (showSpinner == optimistic post-click
+                      OR confirmed via SSE) takes priority over the cached
+                      `last_run_status`. Without this, a freshly-clicked Run
+                      keeps showing "Success" from the previous run when SSE
+                      is delayed or unavailable. See runBackupMutation.onSuccess
+                      for the matching delayed-refetch safety net.
+                    */}
+                    {showSpinner || backup.last_run_status === 'running' ? (
+                      <div>
+                        <label className="text-xs font-medium text-gray-500 uppercase">
+                          Last Run
+                        </label>
+                        <div className="mt-1 flex items-center justify-between gap-2">
+                          <span className="text-sm text-gray-700">
+                            {backup.last_run ? formatDateTime(backup.last_run) : 'Just started'}
+                          </span>
+                          <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                            <RefreshCw className="w-3 h-3 mr-1 animate-spin" />
+                            Running
+                          </span>
+                        </div>
+                      </div>
+                    ) : backup.last_run ? (
                       <div>
                         <label className="text-xs font-medium text-gray-500 uppercase">
                           Last Run
@@ -1390,11 +1430,6 @@ const Backups: React.FC = () => {
                             <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">
                               <AlertTriangle className="w-3 h-3 mr-1" />
                               Warning
-                            </span>
-                          ) : backup.last_run_status === 'running' ? (
-                            <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
-                              <RefreshCw className="w-3 h-3 mr-1 animate-spin" />
-                              Running
                             </span>
                           ) : (
                             <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-red-100 text-red-800">
@@ -1879,40 +1914,49 @@ const Backups: React.FC = () => {
               </div>
 
               {/* Last Run Section */}
-              {viewingBackup.last_run && (
-                <div className="bg-white border border-gray-200 rounded-lg p-4">
-                  <div className="flex items-center space-x-2 mb-3">
-                    <Clock className="w-5 h-5 text-purple-600" />
-                    <h3 className="text-sm font-semibold text-gray-700 uppercase">Last Run</h3>
+              {(() => {
+                // Same live-state priority as the table/card chips so the
+                // detail modal does not lag behind a freshly-started run.
+                const viewingRunning =
+                  isRunning(viewingBackup.id) ||
+                  minSpinnerBackups.has(viewingBackup.id) ||
+                  viewingBackup.last_run_status === 'running';
+                if (!viewingBackup.last_run && !viewingRunning) return null;
+                return (
+                  <div className="bg-white border border-gray-200 rounded-lg p-4">
+                    <div className="flex items-center space-x-2 mb-3">
+                      <Clock className="w-5 h-5 text-purple-600" />
+                      <h3 className="text-sm font-semibold text-gray-700 uppercase">Last Run</h3>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <p className="text-sm text-gray-900">
+                        {viewingBackup.last_run ? formatDateTime(viewingBackup.last_run) : 'Just started'}
+                      </p>
+                      {viewingRunning ? (
+                        <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                          <RefreshCw className="w-3.5 h-3.5 mr-1 animate-spin" />
+                          Running
+                        </span>
+                      ) : viewingBackup.last_run_status === 'success' ? (
+                        <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                          <CheckCircle className="w-3.5 h-3.5 mr-1" />
+                          Success
+                        </span>
+                      ) : viewingBackup.last_run_status === 'warning' ? (
+                        <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">
+                          <AlertTriangle className="w-3.5 h-3.5 mr-1" />
+                          Warning
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-red-100 text-red-800">
+                          <AlertTriangle className="w-3.5 h-3.5 mr-1" />
+                          Failed
+                        </span>
+                      )}
+                    </div>
                   </div>
-                  <div className="flex items-center justify-between">
-                    <p className="text-sm text-gray-900">
-                      {formatDateTime(viewingBackup.last_run)}
-                    </p>
-                    {viewingBackup.last_run_status === 'success' ? (
-                      <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">
-                        <CheckCircle className="w-3.5 h-3.5 mr-1" />
-                        Success
-                      </span>
-                    ) : viewingBackup.last_run_status === 'warning' ? (
-                      <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">
-                        <AlertTriangle className="w-3.5 h-3.5 mr-1" />
-                        Warning
-                      </span>
-                    ) : viewingBackup.last_run_status === 'running' ? (
-                      <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
-                        <RefreshCw className="w-3.5 h-3.5 mr-1 animate-spin" />
-                        Running
-                      </span>
-                    ) : (
-                      <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-red-100 text-red-800">
-                        <AlertTriangle className="w-3.5 h-3.5 mr-1" />
-                        Failed
-                      </span>
-                    )}
-                  </div>
-                </div>
-              )}
+                );
+              })()}
 
               {/* Metadata */}
               <div className="bg-gray-50 rounded-lg p-4">

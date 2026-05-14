@@ -45,11 +45,10 @@ interface NtfyConfig {
 interface NtfyConfigFormProps {
   config: NtfyConfig | null;
   onSave: (config: NtfyConfig) => Promise<void>;
-  onTest?: () => void;
   isSaving?: boolean;
 }
 
-export default function NtfyConfigForm({ config, onSave, onTest, isSaving }: NtfyConfigFormProps) {
+export default function NtfyConfigForm({ config, onSave, isSaving }: NtfyConfigFormProps) {
   const [formData, setFormData] = useState<NtfyConfig>({
     enabled: false,
     server: 'https://ntfy.sh',
@@ -158,14 +157,6 @@ export default function NtfyConfigForm({ config, onSave, onTest, isSaving }: Ntf
 
     await onSave(dataToSave);
   };
-
-  const priorityOptions = [
-    { value: 'min', label: 'Min', description: 'No sound, lowest priority' },
-    { value: 'low', label: 'Low', description: 'Low priority' },
-    { value: 'default', label: 'Default', description: 'Standard notification' },
-    { value: 'high', label: 'High', description: 'High priority, more prominent' },
-    { value: 'urgent', label: 'Urgent', description: 'Bypasses DND, highest priority' },
-  ];
 
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
@@ -443,162 +434,6 @@ export default function NtfyConfigForm({ config, onSave, onTest, isSaving }: Ntf
             </p>
           </div>
         )}
-      </div>
-
-      {/* Notification Events */}
-      <div className="space-y-4">
-        <h3 className="text-lg font-medium text-gray-900">Notification Events</h3>
-        <p className="text-sm text-gray-500">Choose which events trigger a notification to your phone/device.</p>
-        
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          {/* Success */}
-          <label className={`flex items-center justify-between p-3 rounded-lg border-2 cursor-pointer transition-colors ${
-            formData.notifications.success.enabled 
-              ? 'border-green-500 bg-green-50' 
-              : 'border-gray-200 hover:border-gray-300'
-          }`}>
-            <div className="flex items-center space-x-3">
-              <span className="text-lg">✅</span>
-              <div>
-                <span className="font-medium text-gray-900">Backup Success</span>
-                <p className="text-xs text-gray-500">Notify when backup completes successfully</p>
-              </div>
-            </div>
-            <input
-              type="checkbox"
-              checked={formData.notifications.success.enabled}
-              onChange={(e) => setFormData({
-                ...formData,
-                notifications: {
-                  ...formData.notifications,
-                  success: { ...formData.notifications.success, enabled: e.target.checked }
-                }
-              })}
-              className="w-5 h-5 text-green-600 rounded focus:ring-green-500"
-            />
-          </label>
-
-          {/* Failure */}
-          <label className={`flex items-center justify-between p-3 rounded-lg border-2 cursor-pointer transition-colors ${
-            formData.notifications.failure.enabled 
-              ? 'border-red-500 bg-red-50' 
-              : 'border-gray-200 hover:border-gray-300'
-          }`}>
-            <div className="flex items-center space-x-3">
-              <span className="text-lg">❌</span>
-              <div>
-                <span className="font-medium text-gray-900">Backup Failed</span>
-                <p className="text-xs text-gray-500">Notify when backup fails (recommended)</p>
-              </div>
-            </div>
-            <input
-              type="checkbox"
-              checked={formData.notifications.failure.enabled}
-              onChange={(e) => setFormData({
-                ...formData,
-                notifications: {
-                  ...formData.notifications,
-                  failure: { ...formData.notifications.failure, enabled: e.target.checked }
-                }
-              })}
-              className="w-5 h-5 text-red-600 rounded focus:ring-red-500"
-            />
-          </label>
-
-          {/* Warning */}
-          <label className={`flex items-center justify-between p-3 rounded-lg border-2 cursor-pointer transition-colors ${
-            formData.notifications.warning.enabled 
-              ? 'border-yellow-500 bg-yellow-50' 
-              : 'border-gray-200 hover:border-gray-300'
-          }`}>
-            <div className="flex items-center space-x-3">
-              <span className="text-lg">⚠️</span>
-              <div>
-                <span className="font-medium text-gray-900">Backup Warning</span>
-                <p className="text-xs text-gray-500">Notify when backup completes with warnings</p>
-              </div>
-            </div>
-            <input
-              type="checkbox"
-              checked={formData.notifications.warning.enabled}
-              onChange={(e) => setFormData({
-                ...formData,
-                notifications: {
-                  ...formData.notifications,
-                  warning: { ...formData.notifications.warning, enabled: e.target.checked }
-                }
-              })}
-              className="w-5 h-5 text-yellow-600 rounded focus:ring-yellow-500"
-            />
-          </label>
-
-          {/* Security Alert */}
-          <label className={`flex items-center justify-between p-3 rounded-lg border-2 cursor-pointer transition-colors ${
-            formData.notifications.security_alert.enabled 
-              ? 'border-purple-500 bg-purple-50' 
-              : 'border-gray-200 hover:border-gray-300'
-          }`}>
-            <div className="flex items-center space-x-3">
-              <span className="text-lg">🚨</span>
-              <div>
-                <span className="font-medium text-gray-900">Security Alert</span>
-                <p className="text-xs text-gray-500">Ransomware/canary file detection (critical)</p>
-              </div>
-            </div>
-            <input
-              type="checkbox"
-              checked={formData.notifications.security_alert.enabled}
-              onChange={(e) => setFormData({
-                ...formData,
-                notifications: {
-                  ...formData.notifications,
-                  security_alert: { ...formData.notifications.security_alert, enabled: e.target.checked }
-                }
-              })}
-              className="w-5 h-5 text-purple-600 rounded focus:ring-purple-500"
-            />
-          </label>
-        </div>
-      </div>
-
-      {/* Default Priority */}
-      <div className="space-y-4">
-        <h3 className="text-lg font-medium text-gray-900">Default Settings</h3>
-
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            Default Priority
-          </label>
-          <p className="text-xs text-gray-500 mb-3">
-            Controls how notifications appear on your device. Higher priorities are more intrusive.
-          </p>
-          <div className="grid grid-cols-5 gap-2">
-            {priorityOptions.map((option) => (
-              <button
-                key={option.value}
-                type="button"
-                onClick={() => setFormData({
-                  ...formData,
-                  defaults: { ...formData.defaults, priority: option.value }
-                })}
-                className={`p-2 text-center rounded-lg border-2 transition-colors ${formData.defaults.priority === option.value
-                  ? 'border-blue-500 bg-blue-50 text-blue-700'
-                  : 'border-gray-200 hover:border-gray-300'
-                  }`}
-                title={option.description}
-              >
-                <span className="text-sm font-medium">{option.label}</span>
-              </button>
-            ))}
-          </div>
-          <div className="mt-2 text-xs text-gray-500 grid grid-cols-5 gap-2 text-center">
-            <span>Silent</span>
-            <span>Quiet</span>
-            <span>Normal</span>
-            <span>Prominent</span>
-            <span>Bypasses DND</span>
-          </div>
-        </div>
       </div>
 
       {/* Test & Save Buttons */}

@@ -161,5 +161,38 @@ router.post('/certificate/regenerate', authenticateToken, requireAdmin, async (r
     }
 });
 
+/**
+ * Get sshfs availability on the backend container.
+ * Used by the wizard's SSH source card to surface a one-time inline banner
+ * when sshfs/FUSE is not available so the user knows what to install.
+ */
+router.get('/sshfs-status', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        const sshfsHelpers = require('../services/sshfs-helpers');
+        // Allow the UI to force a re-probe (e.g. after the user installed
+        // sshfs on the host) by passing ?refresh=1.
+        const force = req.query && (
+            req.query.refresh === '1'
+            || req.query.refresh === 'true'
+            || req.query.force === '1'
+            || req.query.force === 'true'
+        );
+        const status = sshfsHelpers.isSshfsAvailable({ force });
+        res.json({
+            success: true,
+            data: {
+                available: status.available,
+                error: status.error,
+            },
+        });
+    } catch (error) {
+        console.error('Failed to check sshfs availability:', error.message);
+        res.status(500).json({
+            success: false,
+            detail: 'Failed to check sshfs availability',
+        });
+    }
+});
+
 module.exports = router;
 

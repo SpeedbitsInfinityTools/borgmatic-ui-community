@@ -347,6 +347,15 @@ export const directorAPI = {
   rejectClient: (clientId: string) => api.delete(`/director/clients/${clientId}`),
   updateClient: (clientId: string, data: any) => api.put(`/director/clients/${clientId}`, data),
   getStats: () => api.get('/director/stats'),
+  // New: fleet health overview (last 24h-by-default of client-pushed events).
+  getFleetHealth: (hours = 24) => api.get(`/director/fleet-health?hours=${hours}`),
+  // New: per-client backup-event log (drives Clients-page detail panel).
+  getClientEvents: (clientId: string, limit = 25) =>
+    api.get(`/director/clients/${clientId}/events?limit=${limit}`),
+  // New: rotate this single client's per-client connection token (locks it out until
+  // the new token is pasted on its side).
+  rotateClientToken: (clientId: string) =>
+    api.post(`/director/clients/${clientId}/rotate-token`),
 }
 
 export const templatesAPI = {
@@ -397,6 +406,8 @@ export const systemConfigAPI = {
     api.post('/system-config/domain', { domain, additional_domains: additionalDomains }),
   getCertificate: () => api.get('/system-config/certificate'),
   regenerateCertificate: () => api.post('/system-config/certificate/regenerate'),
+  getSshfsStatus: (refresh = false) =>
+    api.get('/system-config/sshfs-status', refresh ? { params: { refresh: 1 } } : undefined),
 }
 
 export const configAPI = {

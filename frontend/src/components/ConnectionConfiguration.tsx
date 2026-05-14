@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Copy, CheckCircle, RefreshCw, AlertTriangle } from 'lucide-react';
+import { Copy, CheckCircle, RefreshCw, AlertTriangle, Eye, EyeOff } from 'lucide-react';
 import { identityAPI } from '../services/api';
 import { toast } from 'react-hot-toast';
 
@@ -14,6 +14,9 @@ export default function ConnectionConfiguration() {
     const [tokenValue, setTokenValue] = useState('');
     const [savingToken, setSavingToken] = useState(false);
     const [tokenSuccess, setTokenSuccess] = useState(false);
+    // Token reveal — defaults to hidden so a screenshot or screen-share doesn't leak it.
+    const [showToken, setShowToken] = useState(false);
+    const [showTokenInput, setShowTokenInput] = useState(false);
 
     // Port editing
     const [editingPort, setEditingPort] = useState(false);
@@ -201,22 +204,34 @@ export default function ConnectionConfiguration() {
                 </div>
             </div>
 
-            {/* Connection Token */}
+            {/* Connection Token (a.k.a. bootstrap token) */}
             <div className="card">
                 <div className="p-6 border-b border-gray-200">
-                    <h3 className="text-lg font-semibold text-gray-900">Connection Token</h3>
+                    <h3 className="text-lg font-semibold text-gray-900">Bootstrap Connection Token</h3>
                     <p className="mt-1 text-sm text-gray-500">
-                        Token-based authentication for client connections
+                        Used by a client the <strong>first time</strong> it connects. After successful authentication
+                        the director issues each client its own per-client token automatically; from then on the
+                        per-client token is what the client uses, and rotating it on the Clients page only affects that one client.
+                        Rotating the bootstrap token below globally re-keys initial joining for any future new client.
                     </p>
                 </div>
 
                 <div className="p-6">
                     <div className="p-4 bg-green-50 border border-green-200 rounded-lg">
                         <div className="flex items-center justify-between mb-2">
-                            <h4 className="text-sm font-semibold text-green-900">Connection Token</h4>
+                            <h4 className="text-sm font-semibold text-green-900">Bootstrap Token</h4>
                             <div className="flex items-center space-x-2">
                                 {!editingToken && (
                                     <>
+                                        <button
+                                            onClick={() => setShowToken((v) => !v)}
+                                            className="text-xs px-2 py-1 text-green-800 hover:bg-green-100 rounded inline-flex items-center gap-1"
+                                            title={showToken ? 'Hide token' : 'Reveal token'}
+                                            aria-label={showToken ? 'Hide token' : 'Reveal token'}
+                                        >
+                                            {showToken ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                                            <span>{showToken ? 'Hide' : 'Show'}</span>
+                                        </button>
                                         <button
                                             onClick={() => {
                                                 navigator.clipboard.writeText(status.identity?.connection_token || '');
@@ -244,13 +259,25 @@ export default function ConnectionConfiguration() {
 
                         {editingToken ? (
                             <div className="space-y-3">
-                                <input
-                                    type="text"
-                                    value={tokenValue}
-                                    onChange={(e) => setTokenValue(e.target.value)}
-                                    className="input text-xs font-mono w-full"
-                                    placeholder="Leave empty for open access (no token required)"
-                                />
+                                <div className="relative">
+                                    <input
+                                        type={showTokenInput ? 'text' : 'password'}
+                                        value={tokenValue}
+                                        onChange={(e) => setTokenValue(e.target.value)}
+                                        className="input text-xs font-mono w-full pr-10"
+                                        placeholder="Leave empty for open access (no token required)"
+                                        autoComplete="new-password"
+                                    />
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowTokenInput((v) => !v)}
+                                        className="absolute inset-y-0 right-0 flex items-center px-2 text-gray-500 hover:text-gray-800"
+                                        title={showTokenInput ? 'Hide token' : 'Reveal token'}
+                                        aria-label={showTokenInput ? 'Hide token' : 'Reveal token'}
+                                    >
+                                        {showTokenInput ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                                    </button>
+                                </div>
                                 <div className="flex items-center space-x-2">
                                     <button
                                         onClick={handleSaveToken}
@@ -267,6 +294,7 @@ export default function ConnectionConfiguration() {
                                         onClick={() => {
                                             setEditingToken(false);
                                             setTokenValue(status.identity?.connection_token || '');
+                                            setShowTokenInput(false);
                                         }}
                                         disabled={savingToken}
                                         className="btn-secondary text-xs px-4 py-2"
@@ -277,8 +305,12 @@ export default function ConnectionConfiguration() {
                             </div>
                         ) : (
                             <>
-                                <p className="text-xs text-green-800 font-mono bg-white px-3 py-2 rounded border border-green-300 break-all">
-                                    {status.identity?.connection_token || <span className="text-gray-400 italic">Empty (open access)</span>}
+                                <p className="text-xs text-green-800 font-mono bg-white px-3 py-2 rounded border border-green-300 break-all select-all">
+                                    {status.identity?.connection_token
+                                        ? (showToken
+                                            ? status.identity.connection_token
+                                            : '•'.repeat(Math.min(48, String(status.identity.connection_token).length)))
+                                        : <span className="text-gray-400 italic">Empty (open access)</span>}
                                 </p>
                                 {tokenSuccess && (
                                     <div className="mt-2 p-2 bg-green-100 border border-green-300 rounded flex items-center space-x-2">

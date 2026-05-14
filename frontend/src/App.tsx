@@ -20,6 +20,7 @@ import Deployments from './pages/Deployments'
 import Notifications from './pages/Notifications'
 import LogsOverview from './pages/LogsOverview'
 import Scripts from './pages/Scripts'
+import Clients from './pages/Clients'
 import { SSEProvider } from './contexts/SSEContext'
 import { DirectorProvider } from './contexts/DirectorContext'
 import InitialSetupModal from './components/InitialSetupModal'
@@ -124,6 +125,7 @@ function AppContent() {
           <Route path="/ssh-keys" element={<SSHKeys />} />
           <Route path="/templates" element={<Templates />} />
           <Route path="/deployments" element={<Deployments />} />
+          <Route path="/clients" element={<Clients />} />
           <Route path="/logs" element={<Logs />} />
           <Route path="/logs-overview" element={<LogsOverview />} />
           <Route path="/notifications" element={<Notifications />} />
