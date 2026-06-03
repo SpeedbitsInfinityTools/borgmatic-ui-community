@@ -10,6 +10,37 @@ const config = require('../config');
  */
 
 /**
+ * Normalize a private key blob so OpenSSL/libcrypto accepts it.
+ *
+ * The OpenSSH PEM format MUST end with a newline after the
+ * `-----END ... KEY-----` line; without it `ssh-keygen`, `ssh`, `sshfs`, and
+ * anything else built on libcrypto fail with the cryptic
+ *   `Load key "...": error in libcrypto`
+ *
+ * That trailing newline is easy to lose in transit: browsers' textarea
+ * `.value`, JSON marshalling, copy/paste from a UI, and a generic `.trim()`
+ * in route handlers all strip it. We also see CRLF (\r\n) from Windows
+ * uploads, which trips a different libcrypto path.
+ *
+ * This normalizer:
+ *   - Returns non-PEM input untouched (so passphrases / public keys aren't mangled).
+ *   - Converts CRLF and CR line endings to LF.
+ *   - Strips trailing whitespace, then appends exactly one '\n'.
+ *
+ * Always call this on a private key right before writing it to disk or
+ * handing it to a libcrypto-backed tool.
+ *
+ * @param {string} privateKey
+ * @returns {string}
+ */
+function normalizePrivateKeyText(privateKey) {
+    if (typeof privateKey !== 'string' || privateKey.length === 0) return privateKey;
+    const looksLikePem = /-----BEGIN [A-Z0-9 ]+KEY-----/.test(privateKey);
+    if (!looksLikePem) return privateKey;
+    return privateKey.replace(/\r\n?/g, '\n').replace(/\s+$/, '') + '\n';
+}
+
+/**
  * Decrypt private key using SECRET_KEY
  */
 function decryptPrivateKey(encryptedPrivateKey) {
@@ -76,8 +107,9 @@ async function getSSHKey(keyId) {
             return null;
         }
         
-        // Decrypt private key
-        const privateKey = decryptPrivateKey(sshKey.private_key);
+        // Decrypt private key and normalize so libcrypto-backed tools (ssh-keygen,
+        // ssh, sshfs, borg) don't choke on a missing trailing newline.
+        const privateKey = normalizePrivateKeyText(decryptPrivateKey(sshKey.private_key));
         
         // Decrypt passphrase if present
         let passphrase = null;
@@ -105,6 +137,7 @@ async function getSSHKey(keyId) {
 }
 
 module.exports = {
-    getSSHKey
+    getSSHKey,
+    normalizePrivateKeyText
 };
 

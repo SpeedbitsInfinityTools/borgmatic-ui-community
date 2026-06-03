@@ -630,25 +630,66 @@ router.get('/networks', authenticateToken, requireAdmin, async (req, res) => {
             child.on('error', (error) => reject(error));
         });
 
-        // Get networks that the borgmatic container (or current container) is connected to
-        const connectedPromise = new Promise((resolve) => {
-            // Try to find borgmatic or borgmatic-ui container
-            const child = spawnDocker(['inspect', '--format', '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}', 'borgmatic-ui']);
-            let stdout = '';
-            
-            child.stdout.on('data', (data) => stdout += data.toString());
-            
-            child.on('close', (code) => {
-                if (code === 0 && stdout.trim()) {
-                    resolve(stdout.trim().split(' ').filter(n => n));
-                } else {
-                    // Fallback: return borgmatic-db as default recommended network
-                    resolve(['borgmatic-db']);
-                }
+        // Get networks that the borgmatic-ui container itself is connected to. The
+        // container is almost never literally named `borgmatic-ui` — Compose adds a
+        // project prefix (`<project>-borgmatic-ui-1`), and the user may name it
+        // anything. Best self-detection: read our own container ID from
+        // /etc/hostname (Docker sets this to the short container ID) and inspect
+        // that. Fall back to a name-pattern scan, then to the literal name.
+        const fsExtra = require('fs-extra');
+        const connectedPromise = (async () => {
+            const tryInspect = (id) => new Promise((resolve) => {
+                const child = spawnDocker(['inspect', '--format', '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}', id]);
+                let stdout = '';
+                child.stdout.on('data', (data) => stdout += data.toString());
+                child.on('close', (code) => {
+                    if (code === 0 && stdout.trim()) {
+                        resolve(stdout.trim().split(/\s+/).filter(Boolean));
+                    } else {
+                        resolve(null);
+                    }
+                });
+                child.on('error', () => resolve(null));
             });
-            
-            child.on('error', () => resolve(['borgmatic-db']));
-        });
+
+            // 1) Self via /etc/hostname (only works when we're running inside Docker).
+            try {
+                const hostnameFile = await fsExtra.readFile('/etc/hostname', 'utf8');
+                const selfId = hostnameFile.trim();
+                if (selfId) {
+                    const nets = await tryInspect(selfId);
+                    if (nets) return nets;
+                }
+            } catch (_) { /* not in a container or /etc/hostname unreadable */ }
+
+            // 2) By image: any running container whose image name contains
+            //    `borgmatic-ui` or `infinity-tools-borgmatic` is plausibly us.
+            const byImage = await new Promise((resolve) => {
+                const child = spawnDocker(['ps', '--format', '{{.Names}}\t{{.Image}}']);
+                let stdout = '';
+                child.stdout.on('data', (data) => stdout += data.toString());
+                child.on('close', (code) => {
+                    if (code !== 0) return resolve(null);
+                    const lines = stdout.split('\n').map(l => l.trim()).filter(Boolean);
+                    const match = lines.find(l => /borgmatic-ui|infinity-tools-borgmatic/i.test(l));
+                    resolve(match ? match.split('\t')[0] : null);
+                });
+                child.on('error', () => resolve(null));
+            });
+            if (byImage) {
+                const nets = await tryInspect(byImage);
+                if (nets) return nets;
+            }
+
+            // 3) Legacy literal name.
+            const literal = await tryInspect('borgmatic-ui');
+            if (literal) return literal;
+
+            // 4) Last resort: don't lie — return empty. The UI should then
+            //    recommend "Scan all networks" rather than pre-selecting a
+            //    network that might not contain anything useful.
+            return [];
+        })();
 
         const [allNetworks, connectedNetworks] = await Promise.all([networksPromise, connectedPromise]);
 

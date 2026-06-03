@@ -113,12 +113,24 @@ class DatabaseDiscoveryService {
             // Count by type
             const summary = this._generateSummary(databases);
 
+            // Pull diagnostic counters (containers seen, networks scanned, ...) so
+            // the UI can produce an actionable empty-state. Best-effort: failures
+            // here must NOT break the main discovery response.
+            let diagnostic = null;
+            try {
+                const diagOutput = await this._runDiscoveryScript({ ...options, mode: 'diagnostic' });
+                diagnostic = JSON.parse(diagOutput.trim());
+            } catch (diagErr) {
+                console.warn('⚠️  Discovery diagnostic probe failed:', diagErr.message);
+            }
+
             const result = {
                 databases: databases,
                 summary: summary,
                 count: databases.length,
                 timestamp: new Date().toISOString(),
-                options: options
+                options: options,
+                diagnostic: diagnostic
             };
 
             // Cache results (passwords already masked)
@@ -259,7 +271,12 @@ class DatabaseDiscoveryService {
             const env = {
                 ...process.env,
                 BORG_DB_NETWORK: networkFilter,
-                INCLUDE_STOPPED: options.includeStopped ? 'true' : 'false'
+                INCLUDE_STOPPED: options.includeStopped ? 'true' : 'false',
+                // When set, the script ignores BORG_DB_NETWORK entirely and scans
+                // every container. This is the "broad-scan / include host" mode and
+                // is what users expect when the default `borgmatic-db` network is
+                // empty (most vanilla Wordpress/Nextcloud deployments).
+                INCLUDE_HOST: options.includeHost ? 'true' : 'false'
             };
 
             // Support multiple output modes from the discovery script.

@@ -52,14 +52,20 @@ router.get('/', authenticateToken, requireAdmin, async (req, res) => {
  */
 router.post('/', authenticateToken, requireAdmin, async (req, res) => {
     try {
-        const { name, description, key_type, public_key, private_key, passphrase } = req.body;
+        const { name, description, key_type, public_key, private_key: rawPrivateKey, passphrase } = req.body;
 
-        if (!name || !private_key) {
+        if (!name || !rawPrivateKey) {
             return res.status(400).json({
                 success: false,
                 detail: 'Name and private_key are required'
             });
         }
+
+        // Normalize at the boundary: any key written to disk downstream MUST end
+        // with a newline or libcrypto fails. Doing it here means the stored
+        // (encrypted) copy is already correct, so future decryptions are too.
+        const { normalizePrivateKeyText } = require('../services/ssh-keys');
+        const private_key = normalizePrivateKeyText(rawPrivateKey);
 
         // Check if SSH key name already exists
         const existingKeys = await getSSHKeys();
@@ -1243,14 +1249,20 @@ async function extractPublicKeyFromPrivate(privateKey, passphrase = null) {
     const path = require('path');
     const { execa } = require('execa');
     const os = require('os');
-    
+    const { normalizePrivateKeyText } = require('../services/ssh-keys');
+
     // Create temporary file for private key
     const tempDir = os.tmpdir();
     const tempKeyFile = path.join(tempDir, `ssh-extract-${Date.now()}-${Math.random().toString(36).substring(7)}`);
-    
+
     try {
-        // Write private key to temp file with secure permissions
-        await fs.writeFile(tempKeyFile, privateKey, { mode: 0o600 });
+        // Write private key to temp file with secure permissions. ALWAYS normalize
+        // first: ssh-keygen / libcrypto require a trailing newline after the
+        // -----END ... KEY----- line and silently fail with
+        //   `error in libcrypto`
+        // otherwise. Short ed25519 keys are especially prone to losing it through
+        // textarea / JSON / trim() boundaries.
+        await fs.writeFile(tempKeyFile, normalizePrivateKeyText(privateKey), { mode: 0o600 });
         
         // Extract public key using ssh-keygen -y
         // -y: Read a private OpenSSH format file and print an OpenSSH public key to stdout

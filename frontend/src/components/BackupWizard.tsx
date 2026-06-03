@@ -425,6 +425,8 @@ const BackupWizard: React.FC<BackupWizardProps> = ({
         discoveryOptions={w.discoveryOptions} setDiscoveryOptions={w.setDiscoveryOptions}
         availableNetworks={w.availableNetworks} isLoadingNetworks={w.isLoadingNetworks}
         handleAutoDiscover={w.handleAutoDiscover}
+        retryDiscoveryAllNetworks={w.retryDiscoveryAllNetworks}
+        discoveryDiagnostic={w.discoveryDiagnostic}
         showDiscoveryResults={w.showDiscoveryResults} setShowDiscoveryResults={w.setShowDiscoveryResults}
         discoveredDatabases={w.discoveredDatabases} selectedDatabases={w.selectedDatabases}
         toggleDatabaseSelection={w.toggleDatabaseSelection}

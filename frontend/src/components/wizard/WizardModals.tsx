@@ -16,6 +16,14 @@ export interface WizardModalsProps {
   availableNetworks: string[];
   isLoadingNetworks: boolean;
   handleAutoDiscover: () => void;
+  retryDiscoveryAllNetworks: () => void;
+  discoveryDiagnostic: {
+    containers_seen?: number;
+    db_containers_seen?: number;
+    scanned_networks?: string[];
+    network_filter_active?: boolean;
+    include_host?: boolean;
+  } | null;
 
   showDiscoveryResults: boolean;
   setShowDiscoveryResults: (v: boolean) => void;
@@ -70,6 +78,7 @@ const WizardModals: React.FC<WizardModalsProps> = (props) => {
     showCloseConfirm, setShowCloseConfirm, onClose, saveAsDraftAndClose, isSavingDraft,
     showDiscoveryOptions, setShowDiscoveryOptions, discoveryOptions, setDiscoveryOptions,
     availableNetworks, isLoadingNetworks, handleAutoDiscover,
+    retryDiscoveryAllNetworks, discoveryDiagnostic,
     showDiscoveryResults, setShowDiscoveryResults, discoveredDatabases, selectedDatabases,
     toggleDatabaseSelection, selectAllDatabases, deselectAllDatabases, addSelectedDatabases,
     dbBrowserState, setDbBrowserState, selectDatabaseFromBrowser,
@@ -106,8 +115,10 @@ const WizardModals: React.FC<WizardModalsProps> = (props) => {
               <label className="flex items-center space-x-3 p-3 border rounded-lg hover:bg-gray-50 cursor-pointer">
                 <input type="checkbox" checked={discoveryOptions.includeHost} onChange={(e) => setDiscoveryOptions(prev => ({ ...prev, includeHost: e.target.checked }))} className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500" />
                 <div>
-                  <span className="font-medium text-gray-900">Include Host System</span>
-                  <p className="text-sm text-gray-500">Scan for databases running directly on the host</p>
+                  <span className="font-medium text-gray-900">Scan all containers</span>
+                  <p className="text-sm text-gray-500">
+                    Ignore the network filter below and look at every container the Docker daemon can see. Use this if your apps (Wordpress, Nextcloud, ...) use their own Compose networks.
+                  </p>
                 </div>
               </label>
               <div className="border rounded-lg p-3">
@@ -148,10 +159,51 @@ const WizardModals: React.FC<WizardModalsProps> = (props) => {
               <button onClick={() => setShowDiscoveryResults(false)} className="text-gray-400 hover:text-gray-600"><X className="w-6 h-6" /></button>
             </div>
             {discoveredDatabases.length === 0 ? (
-              <div className="text-center py-12">
+              <div className="text-center py-12 max-w-xl mx-auto">
                 <Database className="w-16 h-16 text-gray-300 mx-auto mb-4" />
-                <p className="text-gray-600">No database containers found.</p>
-                <p className="text-sm text-gray-500 mt-2">Make sure your database containers (MariaDB, PostgreSQL, MongoDB) are running.</p>
+                <p className="text-gray-700 font-medium">No database containers matched the scan filter.</p>
+
+                {discoveryDiagnostic ? (
+                  <div className="text-sm text-gray-600 mt-3 space-y-1">
+                    {discoveryDiagnostic.include_host ? (
+                      <p>
+                        Scanned <span className="font-semibold">all networks</span> — saw{' '}
+                        <span className="font-semibold">{discoveryDiagnostic.containers_seen ?? 0}</span> running container{discoveryDiagnostic.containers_seen === 1 ? '' : 's'},{' '}
+                        <span className="font-semibold">{discoveryDiagnostic.db_containers_seen ?? 0}</span> of which look like database engines.
+                      </p>
+                    ) : (
+                      <p>
+                        Scanned{' '}
+                        {discoveryDiagnostic.scanned_networks && discoveryDiagnostic.scanned_networks.length > 0 ? (
+                          <span className="font-mono text-xs bg-gray-100 px-1.5 py-0.5 rounded">{discoveryDiagnostic.scanned_networks.join(', ')}</span>
+                        ) : (
+                          <span>no networks</span>
+                        )}{' '}
+                        — saw <span className="font-semibold">{discoveryDiagnostic.containers_seen ?? 0}</span> running container{discoveryDiagnostic.containers_seen === 1 ? '' : 's'} on this host,{' '}
+                        <span className="font-semibold">{discoveryDiagnostic.db_containers_seen ?? 0}</span> of which look like database engines.
+                      </p>
+                    )}
+
+                    {!discoveryDiagnostic.include_host && (discoveryDiagnostic.db_containers_seen ?? 0) > 0 && (
+                      <p className="text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1 mt-2 inline-block">
+                        Found database containers — but none on the selected networks. They likely use a different Docker network (e.g. <code className="font-mono">wordpress_default</code>, <code className="font-mono">nextcloud_default</code>).
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <p className="text-sm text-gray-500 mt-2">Make sure your database containers (MariaDB, PostgreSQL, MongoDB) are running.</p>
+                )}
+
+                <div className="flex items-center justify-center gap-3 mt-5">
+                  {!discoveryDiagnostic?.include_host && (
+                    <button onClick={retryDiscoveryAllNetworks} className="btn-primary flex items-center space-x-2">
+                      <Database className="w-4 h-4" /><span>Scan all networks</span>
+                    </button>
+                  )}
+                  <button onClick={() => { setShowDiscoveryResults(false); setShowDiscoveryOptions(true); }} className="btn-secondary">
+                    Adjust scan options
+                  </button>
+                </div>
               </div>
             ) : (
               <>

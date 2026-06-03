@@ -464,9 +464,17 @@ class TemplateManager {
 
             if (template.databaseBackup.auto_discover && services.databaseDiscovery) {
                 try {
-                    // Run database discovery WITH credentials (internal use - passwords stay server-side)
+                    // Run database discovery WITH credentials (internal use - passwords stay server-side).
+                    //
+                    // We deliberately scan EVERY container the Docker daemon can see
+                    // (`includeHost: true`) rather than only the opinionated
+                    // `borgmatic-db` network. The Infinity template promises to
+                    // automatically find databases on this host — restricting it to
+                    // one specific Docker network silently misses every standard
+                    // Compose deployment (Wordpress, Nextcloud, ...) where the DB
+                    // container is on `<app>_default`.
                     const discoveryResult = await services.databaseDiscovery.discoverDatabasesWithCredentials({
-                        networks: ['borgmatic-db'],
+                        includeHost: true,
                         forceRefresh: true
                     });
 

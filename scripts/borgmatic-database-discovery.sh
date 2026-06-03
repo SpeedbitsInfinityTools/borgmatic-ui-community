@@ -27,7 +27,18 @@ fi
 # BORG_DB_NETWORK can be a space-separated list of networks
 BORG_DB_NETWORK="${BORG_DB_NETWORK:-}"
 INCLUDE_STOPPED="${INCLUDE_STOPPED:-false}"
+# When true, ignore the network filter entirely and scan every container the
+# Docker daemon can see. Useful in vanilla deployments where users install apps
+# (Wordpress, Nextcloud, ...) with default Compose networks and never join a
+# dedicated `borgmatic-db` network. Surfaced in the UI as "Include Host System".
+INCLUDE_HOST="${INCLUDE_HOST:-false}"
 SPEEDBITS_DIR="/opt/speedbits"
+
+# Normalize: if INCLUDE_HOST is set, drop the network filter so every container
+# image-match is accepted regardless of which networks it joined.
+if [ "$INCLUDE_HOST" = "true" ]; then
+    BORG_DB_NETWORK=""
+fi
 
 ###############################################################################
 # Helper Functions
@@ -399,6 +410,40 @@ output_count() {
 # Main Execution
 ###############################################################################
 
+# Lightweight diagnostic mode: print one JSON object with what the scan saw so
+# the UI can render a helpful empty-state ("scanned X networks, saw Y containers,
+# no DB images among them") instead of a generic "no databases found".
+output_diagnostic() {
+    local total_containers=0
+    local total_db_images=0
+    if [ "$INCLUDE_STOPPED" = "true" ]; then
+        total_containers=$(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -c . || echo 0)
+    else
+        total_containers=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -c . || echo 0)
+    fi
+    # Containers whose image looks like a supported DB engine (regardless of
+    # network membership — this is the metric that matters for "did the user
+    # have any DB at all?").
+    local ps_flag=""
+    [ "$INCLUDE_STOPPED" = "true" ] && ps_flag="-a"
+    while IFS= read -r container; do
+        [ -z "$container" ] && continue
+        local image
+        image=$(get_container_image "$container")
+        if [[ "$image" =~ mariadb|mysql|postgres|mongo|mssql|sql-server|azure-sql ]]; then
+            total_db_images=$((total_db_images + 1))
+        fi
+    done < <(docker ps $ps_flag --format '{{.Names}}' 2>/dev/null)
+
+    # Escape network list for JSON
+    local networks_json
+    networks_json=$(printf '%s' "$BORG_DB_NETWORK" | tr ' ' '\n' | grep -v '^$' \
+        | awk 'BEGIN{first=1} {gsub(/\\/,"\\\\"); gsub(/"/,"\\\""); if(!first)printf(","); printf("\"%s\"", $0); first=0}')
+    cat <<EOF
+{"containers_seen":${total_containers},"db_containers_seen":${total_db_images},"scanned_networks":[${networks_json}],"network_filter_active":$([ -n "$BORG_DB_NETWORK" ] && echo true || echo false),"include_host":$([ "$INCLUDE_HOST" = "true" ] && echo true || echo false)}
+EOF
+}
+
 MODE="${1:-summary}"
 
 case "$MODE" in
@@ -407,6 +452,9 @@ case "$MODE" in
         ;;
     count)
         output_count
+        ;;
+    diagnostic)
+        output_diagnostic
         ;;
     summary|*)
         output_summary

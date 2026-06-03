@@ -125,6 +125,16 @@ export function useBackupWizard({ onClose, onSuccess, editBackup, mode = 'produc
   const [selectedDatabases, setSelectedDatabases] = useState<string[]>([]);
   const [showDiscoveryResults, setShowDiscoveryResults] = useState(false);
   const [showDiscoveryOptions, setShowDiscoveryOptions] = useState(false);
+  // Diagnostic counters returned by the backend (containers seen, networks
+  // scanned, ...) — drives the empty-state UI so users see *why* nothing was
+  // found instead of a generic "no databases" message.
+  const [discoveryDiagnostic, setDiscoveryDiagnostic] = useState<{
+    containers_seen?: number;
+    db_containers_seen?: number;
+    scanned_networks?: string[];
+    network_filter_active?: boolean;
+    include_host?: boolean;
+  } | null>(null);
   const [discoveryOptions, setDiscoveryOptions] = useState({
     includeHost: true,
     networks: ['borgmatic-db'] as string[],
@@ -818,15 +828,28 @@ export function useBackupWizard({ onClose, onSuccess, editBackup, mode = 'produc
     setIsLoadingNetworks(true);
     try {
       const response = await databaseDiscoveryAPI.getNetworks();
-      const networks = response.data.data?.networks || [];
+      const networks: string[] = response.data.data?.networks || [];
       setAvailableNetworks(networks);
-      const connectedNetworks = response.data.data?.connected || [];
+      const connectedNetworks: string[] = response.data.data?.connected || [];
+
+      // Sensible default selection:
+      //   • If the borgmatic-ui container is actually attached to some networks
+      //     (typically borgmatic-db on opinionated SpeedBits hosts), pre-select
+      //     those — that's the most useful filter for that setup.
+      //   • Otherwise, we have no idea where the user keeps their DB containers
+      //     (Wordpress / Nextcloud default Compose networks, etc.), so default
+      //     to the broad "Include Host System" sweep — anything else returns
+      //     zero results on a vanilla install and looks like a bug.
       if (connectedNetworks.length > 0) {
-        setDiscoveryOptions(prev => ({ ...prev, networks: connectedNetworks }));
+        setDiscoveryOptions(prev => ({ ...prev, networks: connectedNetworks, includeHost: false }));
+      } else {
+        setDiscoveryOptions(prev => ({ ...prev, networks: [], includeHost: true }));
       }
     } catch (error: any) {
       console.error('Failed to load Docker networks:', error);
       setAvailableNetworks(['borgmatic-db', 'bridge', 'host']);
+      // Same fallback logic: when we don't know the layout, sweep everything.
+      setDiscoveryOptions(prev => ({ ...prev, networks: [], includeHost: true }));
     } finally {
       setIsLoadingNetworks(false);
     }
@@ -837,24 +860,40 @@ export function useBackupWizard({ onClose, onSuccess, editBackup, mode = 'produc
     await loadDockerNetworks();
   };
 
-  const handleAutoDiscover = async () => {
+  // Shared scan runner. `overrides` lets the empty-state "Scan all networks"
+  // retry path re-invoke discovery without the user re-opening the options modal.
+  const runDiscovery = async (overrides?: { networks?: string[]; includeHost?: boolean }) => {
+    const networks = overrides?.networks ?? discoveryOptions.networks;
+    const includeHost = overrides?.includeHost ?? discoveryOptions.includeHost;
     setShowDiscoveryOptions(false);
     setIsDiscovering(true);
     try {
       const response = await databaseDiscoveryAPI.scan({
-        networks: discoveryOptions.networks, includeHost: discoveryOptions.includeHost, forceRefresh: true,
+        networks, includeHost, forceRefresh: true,
       });
       const databases = response.data.data?.databases || [];
+      const diagnostic = response.data.data?.diagnostic || null;
       setDiscoveredDatabases(databases);
+      setDiscoveryDiagnostic(diagnostic);
       setShowDiscoveryResults(true);
       setSelectedDatabases(databases.map((db: any) => db.id));
-      toast.success(`Found ${databases.length} database${databases.length !== 1 ? 's' : ''}`);
+      if (databases.length > 0) {
+        toast.success(`Found ${databases.length} database${databases.length !== 1 ? 's' : ''}`);
+      }
     } catch (error: any) {
       console.error('Database discovery failed:', error);
       toast.error(error.response?.data?.detail || 'Failed to discover databases');
     } finally {
       setIsDiscovering(false);
     }
+  };
+
+  const handleAutoDiscover = () => runDiscovery();
+  const retryDiscoveryAllNetworks = () => {
+    // Reflect the broadened scope in the modal state so a subsequent "Open
+    // options" doesn't silently revert to the narrower filter.
+    setDiscoveryOptions(prev => ({ ...prev, includeHost: true, networks: [] }));
+    return runDiscovery({ includeHost: true, networks: [] });
   };
 
   const toggleDatabaseSelection = (dbId: string) => {
@@ -939,10 +978,12 @@ export function useBackupWizard({ onClose, onSuccess, editBackup, mode = 'produc
     showCloseConfirm, setShowCloseConfirm,
     isSavingDraft,
     discoveredDatabases, isDiscovering, selectedDatabases,
+    discoveryDiagnostic,
     showDiscoveryResults, setShowDiscoveryResults,
     showDiscoveryOptions, setShowDiscoveryOptions,
     discoveryOptions, setDiscoveryOptions,
     availableNetworks, isLoadingNetworks,
+    retryDiscoveryAllNetworks,
     gitDiscoveredReposBySource, setGitDiscoveredReposBySource,
     gitSelectedReposBySource, setGitSelectedReposBySource,
     isDiscoveringGitReposBySource, setIsDiscoveringGitReposBySource,
