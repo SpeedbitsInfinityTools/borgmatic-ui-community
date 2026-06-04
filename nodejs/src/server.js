@@ -70,6 +70,28 @@ const getAppVersion = () => {
 const app = express();
 const PORT = config.port;
 
+// Behind a TLS-terminating reverse proxy (nginx/Traefik/Caddy/...). Honor
+// X-Forwarded-* headers so req.protocol / req.secure / req.ip reflect the
+// original client, not the local socket from the proxy. Without this, any
+// IP-based logic (rate limiting, client.ip recording, audit logs) would record
+// `127.0.0.1` for every request.
+//
+// Scope: this is a *director-mode* feature (the env var is named
+// DIRECTOR_TRUST_PROXY). Enabling it for client/standalone modes by accident
+// would silently make those instances trust spoofed X-Forwarded-For headers
+// from anything that can reach the local port — least surprise wins.
+//
+// We trust the immediate upstream only (one hop) — the safe default that
+// prevents spoofing via crafted X-Forwarded-For headers from external callers.
+// Operators with a chain of proxies should set DIRECTOR_TRUST_PROXY_HOPS to
+// the number of trusted hops.
+if (config.director.trustProxy && config.mode === 'director') {
+    const hops = parseInt(process.env.DIRECTOR_TRUST_PROXY_HOPS, 10);
+    app.set('trust proxy', Number.isFinite(hops) && hops > 0 ? hops : 1);
+} else if (config.director.trustProxy && config.mode && config.mode !== 'director') {
+    console.warn(`⚠️  DIRECTOR_TRUST_PROXY=true ignored — this instance is in ${config.mode} mode, not director`);
+}
+
 // Middleware
 app.use(helmet());
 app.use(cors({
@@ -306,16 +328,15 @@ async function startServer() {
         console.warn('⚠️ Configuration manager initialization warning:', error.message);
     }
 
-    // Initialize SSL certificates (auto-generate if missing)
-    try {
-        const certManager = require('./services/cert-manager');
-        const certResult = await certManager.initialize();
-        if (certResult.generated) {
-            console.log('🔐 Auto-generated self-signed SSL certificates');
-        }
-    } catch (error) {
-        console.warn('⚠️ Certificate manager initialization warning:', error.message);
-    }
+    // Note: SSL certificate auto-generation used to happen unconditionally here
+    // for *every* mode (client / standalone / director), which was wrong:
+    //   • It spammed self-signed PEMs into the data dir for modes that never
+    //     terminate TLS themselves.
+    //   • cert-manager.updateConfig() writes DIRECTOR_SSL_ENABLED=true back into
+    //     `.env`, which would silently flip non-director instances into a
+    //     half-configured "SSL enabled but I'm not the director" state.
+    // Cert initialization now happens once, in the director-mode branch below,
+    // gated on DIRECTOR_TRUST_PROXY=false. Nothing else needs to pre-warm.
 
     // Initialize log manager
     try {
@@ -414,7 +435,17 @@ async function startServer() {
     let useSSL = false;
     let httpServer;
 
-    if (directorMode) {
+    if (directorMode && config.director.trustProxy) {
+        // Operator has explicitly delegated TLS termination to an upstream
+        // reverse proxy. Run plain HTTP locally and DO NOT overwrite
+        // DIRECTOR_SSL_ENABLED in the .env file — that flag is now controlled
+        // by the operator, not by us. The proxy must also forward Socket.IO
+        // upgrade traffic (see the comment on config.director.trustProxy).
+        console.log('🔁 DIRECTOR_TRUST_PROXY=true — TLS terminated by upstream reverse proxy');
+        console.log(`   Director will listen on plain HTTP on port ${PORT}`);
+        console.log(`   X-Forwarded-* headers will be honored (trust proxy enabled)`);
+        console.log(`   Make sure your proxy forwards WebSocket upgrade headers for Socket.IO`);
+    } else if (directorMode) {
         // Auto-generate SSL certificates if missing
         const certManager = require('./services/cert-manager');
         const certResult = await certManager.initialize();
@@ -425,6 +456,8 @@ async function startServer() {
                 console.log(`📁 Certificate: ${certManager.certFile}`);
                 console.log(`🔑 Private Key: ${certManager.keyFile}`);
                 console.log('💡 For production, replace with proper SSL certificates');
+                console.log('💡 To terminate TLS at an upstream nginx/Traefik/Caddy instead,');
+                console.log('   set DIRECTOR_TRUST_PROXY=true and remove this self-signed cert.');
             }
 
             // Update .env to enable SSL
