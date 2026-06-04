@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react';
-import { useQuery } from 'react-query';
+import { useEffect, useState } from 'react';
+import { useQuery, useQueryClient } from 'react-query';
 import { Link } from 'react-router-dom';
 import {
   Monitor,
@@ -40,8 +40,12 @@ const toneClasses: Record<'red' | 'green' | 'blue' | 'gray' | 'amber', string> =
 };
 
 export default function DirectorDashboard() {
-  const [showVaultSetup, setShowVaultSetup] = useState(false);
+  // Manual dismissal flag: lets the operator (in practice: us during testing) close the
+  // modal locally without server confirmation, e.g. after a successful initialization
+  // where the optimistic close should not be undone by an in-flight `/vault/status` poll.
+  const [vaultDismissed, setVaultDismissed] = useState(false);
   const { selectClientWithPulse } = useDirector();
+  const queryClient = useQueryClient();
 
   // Open a remote session against the chosen client. Renamed from "View" → "Start
   // Session" to match the new Clients page and reflect what the action actually does.
@@ -57,20 +61,31 @@ export default function DirectorDashboard() {
     });
   };
 
-  // First-run vault setup — unchanged.
+  // First-run vault setup. Backed by react-query so the result is cached and shared
+  // across renders, and so the modal's visibility is derived from data — not from a
+  // local boolean that depends on a one-shot effect. The old implementation set
+  // `showVaultSetup=true` in a `useEffect` and rendered the modal *inside* the loading
+  // branch below, which meant the modal got unmounted every time the heartbeat-driven
+  // fleet/clients refetch briefly produced an isLoading+no-data window. Result: the
+  // splash flickered open/closed every ~10 s. Reactive state fixes this for good.
+  //
+  // staleTime is generous because vault state changes only on explicit initialize.
+  const { data: vaultStatusData } = useQuery(
+    ['vault-status'],
+    () => vaultAPI.getStatus().then(res => res.data?.data),
+    {
+      staleTime: 5 * 60 * 1000,
+      retry: 1,
+    }
+  );
+  const vaultInitialized = vaultStatusData?.initialized === true;
+  const showVaultSetup = vaultStatusData !== undefined && !vaultInitialized && !vaultDismissed;
+
+  // If the operator dismissed the modal locally but the vault becomes uninitialized
+  // again (e.g. they Reset Vault elsewhere), allow the splash to come back.
   useEffect(() => {
-    const checkVaultStatus = async () => {
-      try {
-        const response = await vaultAPI.getStatus();
-        if (!response.data.data.initialized) {
-          setShowVaultSetup(true);
-        }
-      } catch (error) {
-        console.error('Failed to check vault status:', error);
-      }
-    };
-    checkVaultStatus();
-  }, []);
+    if (vaultInitialized) setVaultDismissed(false);
+  }, [vaultInitialized]);
 
   const { data: clientsData, isLoading: clientsLoading, refetch: refetchClients } = useQuery({
     queryKey: ['director-clients'],
@@ -93,19 +108,35 @@ export default function DirectorDashboard() {
   const problemClients: any[] = fleet?.problem_clients || [];
   const recentActivity: any[] = fleet?.recent_activity || [];
 
+  // IMPORTANT: render the blocking vault-setup modal *before* any early-return so it
+  // stays mounted regardless of whether the dashboard body is currently showing the
+  // loading spinner or the full content. Hoisting fixes the open/close flicker that
+  // happened when the heartbeat refetch briefly produced an isLoading+no-data window.
+  const vaultModalNode = showVaultSetup ? (
+    <VaultSetupModal
+      onComplete={() => {
+        // Optimistic dismissal + cache refresh so the next render sees initialized=true
+        // and the splash stays gone even before the user navigates away and back.
+        setVaultDismissed(true);
+        queryClient.invalidateQueries(['vault-status']);
+      }}
+    />
+  ) : null;
+
   if (isLoading && !clientsData && !fleetData) {
     return (
-      <div className="flex items-center justify-center py-12">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary-600"></div>
-      </div>
+      <>
+        {vaultModalNode}
+        <div className="flex items-center justify-center py-12">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary-600"></div>
+        </div>
+      </>
     );
   }
 
   return (
     <>
-      {showVaultSetup && (
-        <VaultSetupModal onComplete={() => setShowVaultSetup(false)} />
-      )}
+      {vaultModalNode}
 
       <div className="space-y-6">
         <div className="flex items-center justify-between">
