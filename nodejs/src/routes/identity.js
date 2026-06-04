@@ -427,7 +427,7 @@ router.put('/client-config', authenticateToken, requireAdmin, async (req, res) =
         } catch (err) {
             return res.status(400).json({
                 success: false,
-                detail: 'Invalid URL format. Example: https://localhost:8000'
+                detail: 'Invalid URL format. Example: https://10.13.24.1:9000'
             });
         }
 
@@ -998,7 +998,7 @@ router.post('/test-connection', authenticateToken, requireAdmin, async (req, res
         } catch (err) {
             return res.status(400).json({
                 success: false,
-                detail: 'Invalid Director URL format. Use format: https://hostname:port'
+                detail: 'Invalid Director URL format. Use format: http://hostname:port or https://hostname:port'
             });
         }
 
@@ -1008,18 +1008,20 @@ router.post('/test-connection', authenticateToken, requireAdmin, async (req, res
         const isHttps = parsedUrl.protocol === 'https:';
         const client = isHttps ? https : http;
 
-        // Step 1: Check if Director is reachable via health endpoint
-        const healthCheck = new Promise((resolve, reject) => {
+        // Step 1: Check if Director is reachable via health endpoint.
+        const runHealthCheck = (protocol) => new Promise((resolve, reject) => {
+            const useHttps = protocol === 'https:';
+            const transport = useHttps ? https : http;
             const options = {
                 hostname: parsedUrl.hostname,
-                port: parsedUrl.port || (isHttps ? 443 : 80),
+                port: parsedUrl.port || (useHttps ? 443 : 80),
                 path: '/api/health',
                 method: 'GET',
                 timeout: 5000,
                 rejectUnauthorized: false // Allow self-signed certs for local testing
             };
 
-            const testReq = client.request(options, (testRes) => {
+            const testReq = transport.request(options, (testRes) => {
                 let data = '';
                 testRes.on('data', chunk => data += chunk);
                 testRes.on('end', () => {
@@ -1037,7 +1039,10 @@ router.post('/test-connection', authenticateToken, requireAdmin, async (req, res
             });
 
             testReq.on('error', (err) => {
-                reject(new Error(`Cannot reach Director: ${err.message}`));
+                const wrapped = new Error(`Cannot reach Director: ${err.message}`);
+                wrapped.code = err.code;
+                wrapped.rawMessage = err.message;
+                reject(wrapped);
             });
 
             testReq.on('timeout', () => {
@@ -1048,7 +1053,39 @@ router.post('/test-connection', authenticateToken, requireAdmin, async (req, res
             testReq.end();
         });
 
-        await healthCheck;
+        try {
+            await runHealthCheck(parsedUrl.protocol);
+        } catch (healthErr) {
+            // Common operator pitfall: trying HTTPS against the director's internal
+            // plain-HTTP port (especially with DIRECTOR_TRUST_PROXY deployments).
+            const raw = (healthErr?.rawMessage || healthErr?.message || '').toLowerCase();
+            const isProtocolMismatch = isHttps && (
+                healthErr?.code === 'EPROTO' ||
+                raw.includes('wrong version number') ||
+                raw.includes('ssl3_get_record')
+            );
+
+            if (isProtocolMismatch) {
+                // Confirm if plain HTTP works on the same host:port. If yes, provide
+                // a highly actionable error instead of a low-level OpenSSL stack trace.
+                try {
+                    await runHealthCheck('http:');
+                    const portPart = parsedUrl.port ? `:${parsedUrl.port}` : '';
+                    const plainUrl = `http://${parsedUrl.hostname}${portPart}`;
+                    const hostLabel = `${parsedUrl.hostname}${portPart}`;
+                    return res.status(400).json({
+                        success: false,
+                        detail: `TLS mismatch: ${hostLabel} is speaking plain HTTP, but your Director URL uses https://. Use ${plainUrl} for direct local connection, or use your reverse-proxy HTTPS URL (for example https://your-host:8460) if TLS is terminated upstream.`,
+                        suggested_url: plainUrl,
+                        hint: 'When DIRECTOR_TRUST_PROXY=true, the internal director port is HTTP-only.'
+                    });
+                } catch (_) {
+                    // If plain HTTP probe also fails, fall through to the original error.
+                }
+            }
+
+            throw healthErr;
+        }
 
         // Step 2: Validate the connection token with Director.
         // Send our client_id too so the director can match against any

@@ -9,7 +9,7 @@ export default function ClientConfiguration() {
     const [clientConfig, setClientConfig] = useState({
         client_name: '',
         connection_token: '',
-        director_url: '' // Will be set to https://localhost:8000 by default
+        director_url: '' // e.g. https://<director-ip>:9000 (the Director's HTTPS API port)
     });
     const [originalConfig, setOriginalConfig] = useState<any>(null);
     const [savingConfig, setSavingConfig] = useState(false);
@@ -78,7 +78,7 @@ export default function ClientConfiguration() {
             }
         } catch (err) {
             setFieldErrors({ director_url: true });
-            setError('Invalid URL format. Example: https://localhost:8000');
+            setError('Invalid URL format. Example: https://your-server.example.com:9000 (default Director API port is 9000).');
             return;
         }
         
@@ -334,15 +334,29 @@ export default function ClientConfiguration() {
                             if (fieldErrors.director_url) setFieldErrors({ ...fieldErrors, director_url: false });
                         }}
                         className={`input ${fieldErrors.director_url ? 'border-red-500 border-2 focus:border-red-500 focus:ring-red-500' : ''}`}
-                        placeholder="https://localhost:8000"
+                        placeholder="https://<server-ip-or-hostname>:9000"
                         required
                     />
                     {fieldErrors.director_url && (
                         <p className="mt-1 text-xs text-red-600 font-medium">Director URL is required</p>
                     )}
-                    <p className="mt-1 text-xs text-gray-500">
-                        Full URL of your Director server including protocol (http:// or https://) and port. Use <code className="bg-gray-100 px-1 rounded">https://localhost:8000</code> for same-machine connections.
-                    </p>
+                    <div className="mt-1 text-xs text-gray-500 space-y-1">
+                        <p>
+                            The Director&apos;s <strong>API</strong> endpoint over HTTPS (default port <strong>9000</strong>),
+                            e.g. <code className="bg-gray-100 px-1 rounded">https://your-server.example.com:9000</code> or
+                            <code className="ml-1 bg-gray-100 px-1 rounded">https://10.0.0.5:9000</code>.
+                        </p>
+                        <p>
+                            Use the <strong>server&apos;s reachable IP or hostname</strong> (LAN or public) — not
+                            <code className="mx-1 bg-gray-100 px-1 rounded">localhost</code>, which points at this client,
+                            not the Director. This is true even when both the client and the Director run on the same machine,
+                            because the request originates inside the client container.
+                        </p>
+                        <p>
+                            The Director&apos;s web-UI port is a different port from the API port — copy the
+                            API URL from the Director&apos;s <em>Settings → Connection</em> page if unsure.
+                        </p>
+                    </div>
                 </div>
 
                 {/* Connection Token */}
