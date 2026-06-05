@@ -252,7 +252,17 @@ class IdentityManager {
                     connectionStatus = {
                         is_connected: connInfo.isConnected,
                         is_authenticated: connInfo.isAuthenticated,
-                        reconnect_attempts: connInfo.reconnectAttempts
+                        reconnect_attempts: connInfo.reconnectAttempts,
+                        // 'websocket' is the happy path. 'polling' means Socket.IO had
+                        // to fall back because the upstream reverse proxy didn't
+                        // forward the WebSocket upgrade headers — that almost always
+                        // leads to brittle / silently-dropped connections, so we
+                        // surface it so the operator can fix nginx/Traefik.
+                        transport: connInfo.transport || null,
+                        // True when auto-reconnect has given up and the user needs to
+                        // act. Lets the UI render a "Reconnect" CTA instead of
+                        // pretending the system is fine.
+                        reconnect_exhausted: !!connInfo.reconnect_exhausted,
                     };
                 } catch (err) {
                     console.warn('Failed to get director-client connection info:', err.message);

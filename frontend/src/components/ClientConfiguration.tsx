@@ -251,21 +251,34 @@ export default function ClientConfiguration() {
 
         // Use live connection status if available
         if (connection_status?.is_connected && connection_status?.is_authenticated) {
+            // Transport hint: 'polling' is a soft warning — the WebSocket upgrade
+            // didn't go through, so long-lived connections will be brittle (the
+            // exact "client says connected, director sees nothing" bug we hit
+            // when nginx wasn't proxying Upgrade headers).
+            const transport = connection_status.transport;
+            const transportNote = transport === 'polling'
+                ? ' · ⚠ using HTTP long-polling — reverse proxy likely missing WebSocket upgrade headers'
+                : transport === 'websocket'
+                    ? ' · WebSocket'
+                    : '';
             return {
                 type: 'connected' as const,
                 label: 'Connected',
-                description: last_connected 
+                description: (last_connected
                     ? `Last connected: ${new Date(last_connected).toLocaleString()}`
-                    : 'Connected to Director'
+                    : 'Connected to Director') + transportNote,
             };
         }
 
         // Show disconnected if we have connection status but not connected
         if (connection_status !== null && connection_status !== undefined) {
+            const exhausted = connection_status.reconnect_exhausted;
             return {
                 type: 'disconnected' as const,
-                label: 'Not Connected',
-                description: 'Director URL configured but not connected'
+                label: exhausted ? 'Disconnected — auto-reconnect gave up' : 'Not Connected',
+                description: exhausted
+                    ? 'Several reconnect attempts failed. Click Connect to retry.'
+                    : 'Director URL configured but not connected'
             };
         }
 

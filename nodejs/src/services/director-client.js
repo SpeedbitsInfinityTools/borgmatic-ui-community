@@ -15,7 +15,11 @@ class DirectorClient {
         this.isAuthenticated = false;
         this.reconnectAttempts = 0;
         this.maxReconnectAttempts = 5; // Reduced from 10
-        this.reconnectDelay = 10000; // 10 seconds (increased from 5)
+        this.reconnectDelay = 10000; // 10 seconds base delay for exponential backoff
+        this.maxReconnectDelay = 60000; // Cap backoff at 60s so we still try regularly
+        this.reconnectTimer = null;     // Pending setTimeout handle for auto-reconnect
+        this.intentionalDisconnect = false; // User-initiated disconnect — do not auto-reconnect
+        this.activeTransport = null;    // 'websocket' or 'polling' — surfaced to UI for debugging
         this.heartbeatInterval = null;
         this.commandHandlers = new Map();
         this.connectionErrorLogged = false; // Prevent log spam
@@ -31,6 +35,14 @@ class DirectorClient {
      * Initialize and connect to Director
      */
     async connect() {
+        // A fresh connect() always cancels any pending auto-reconnect and clears the
+        // user-initiated-disconnect flag — otherwise an interleaved manual "Connect"
+        // would race with the backoff timer or get blocked by a stale flag.
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
+        }
+        this.intentionalDisconnect = false;
         try {
             // Check if we're in authentication backoff period
             if (this.authFailureCount >= this.maxAuthFailures && this.lastAuthFailure) {
@@ -216,7 +228,17 @@ class DirectorClient {
     setupEventHandlers() {
         // Connection established
         this.socket.on('connect', () => {
-            console.log('✅ Connected to Director');
+            // Surface the chosen transport so the UI can warn the operator if Socket.IO
+            // had to fall back to long-polling (a strong sign the upstream nginx/Traefik
+            // proxy isn't forwarding the WebSocket upgrade headers, which silently breaks
+            // long-lived connections — exactly the "client thinks connected, director sees
+            // nothing" symptom we hit).
+            try {
+                this.activeTransport = this.socket?.io?.engine?.transport?.name || null;
+            } catch (_) {
+                this.activeTransport = null;
+            }
+            console.log(`✅ Connected to Director (transport: ${this.activeTransport || 'unknown'})`);
             this.isConnected = true;
             this.reconnectAttempts = 0;
             this.sendRegistration();
@@ -227,7 +249,22 @@ class DirectorClient {
             console.log(`❌ Disconnected from Director: ${reason}`);
             this.isConnected = false;
             this.isAuthenticated = false;
+            this.activeTransport = null;
             this.stopHeartbeat();
+
+            // Transient disconnects: try to reconnect with backoff. We deliberately
+            // skip reconnection for "io client disconnect" (we tore it down ourselves)
+            // and "io server disconnect" (server kicked us, e.g. forced:disconnect on
+            // token rotation — needs operator action). Everything else (ping timeout,
+            // transport close/error, parse error) is a transient network/proxy hiccup
+            // that we should recover from automatically.
+            const fatalReasons = new Set([
+                'io client disconnect',
+                'io server disconnect',
+            ]);
+            if (!this.intentionalDisconnect && !fatalReasons.has(reason)) {
+                this.scheduleReconnect(reason);
+            }
         });
 
         // Reconnection attempts
@@ -711,10 +748,20 @@ class DirectorClient {
     }
 
     /**
-     * Disconnect from Director
+     * Disconnect from Director (user-initiated). Suppresses auto-reconnect.
      */
     disconnect() {
         console.log('🔌 Disconnecting from Director...');
+
+        // Mark as user-initiated so the disconnect listener (which still fires from
+        // socket.close()) does NOT schedule a reconnect.
+        this.intentionalDisconnect = true;
+
+        // Cancel any pending auto-reconnect attempt
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
+        }
 
         this.stopHeartbeat();
 
@@ -728,8 +775,45 @@ class DirectorClient {
 
         this.isConnected = false;
         this.isAuthenticated = false;
+        this.activeTransport = null;
 
         console.log('✅ Disconnected');
+    }
+
+    /**
+     * Schedule an auto-reconnect with exponential backoff. Idempotent: if a timer
+     * is already pending, do nothing. Stops trying after maxReconnectAttempts so
+     * we don't hammer a Director that is genuinely down or has revoked us.
+     */
+    scheduleReconnect(reason = 'unknown') {
+        if (this.reconnectTimer) return;
+        if (this.intentionalDisconnect) return;
+        if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+            console.warn(`⏸️  Auto-reconnect halted after ${this.reconnectAttempts} attempts. Click Connect in Settings → Client Configuration to retry.`);
+            return;
+        }
+
+        // Exponential backoff capped at maxReconnectDelay so we keep retrying at
+        // a reasonable cadence (last reason this got us in trouble: a director
+        // restart left the client stuck in isConnected=true forever).
+        const attempt = this.reconnectAttempts;
+        const delay = Math.min(this.maxReconnectDelay, this.reconnectDelay * Math.pow(2, attempt));
+        console.log(`🔄 Auto-reconnect in ${Math.round(delay / 1000)}s (reason: ${reason}, attempt ${attempt + 1}/${this.maxReconnectAttempts})`);
+
+        this.reconnectTimer = setTimeout(async () => {
+            this.reconnectTimer = null;
+            this.reconnectAttempts++;
+            try {
+                const result = await this.connect();
+                if (!result?.success) {
+                    // connect() returns instead of throwing — re-arm the backoff.
+                    this.scheduleReconnect(result?.reason || 'connect_failed');
+                }
+            } catch (err) {
+                console.warn(`Auto-reconnect attempt failed: ${err.message}`);
+                this.scheduleReconnect('exception');
+            }
+        }, delay);
     }
 
     /**
@@ -739,7 +823,14 @@ class DirectorClient {
         return {
             isConnected: this.isConnected,
             isAuthenticated: this.isAuthenticated,
-            reconnectAttempts: this.reconnectAttempts
+            reconnectAttempts: this.reconnectAttempts,
+            transport: this.activeTransport,
+            // True when we've given up auto-reconnecting and the user needs to
+            // click Connect. UI uses this to surface a "Reconnect" button instead
+            // of just spinning forever.
+            reconnect_exhausted: !this.isConnected
+                && !this.intentionalDisconnect
+                && this.reconnectAttempts >= this.maxReconnectAttempts,
         };
     }
 }
