@@ -969,7 +969,7 @@ async function testSSHKeyConnection(sshKey, host, username, port) {
         const cmd = isHetzner
             ? [
                 'sftp',
-                '-i', tempFile,
+                '-i', tempFile, '-o', 'IdentitiesOnly=yes',
                 '-oStrictHostKeyChecking=accept-new',
                 '-oConnectTimeout=10',
                 '-oUserKnownHostsFile=/dev/null',
@@ -978,7 +978,7 @@ async function testSSHKeyConnection(sshKey, host, username, port) {
                 `${username}@${host}`,
             ]
             : [
-                'ssh', '-i', tempFile,
+                'ssh', '-i', tempFile, '-o', 'IdentitiesOnly=yes',
                 '-o', 'StrictHostKeyChecking=accept-new',
                 '-o', 'ConnectTimeout=10',
                 '-o', 'UserKnownHostsFile=/dev/null',

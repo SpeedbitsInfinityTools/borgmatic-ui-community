@@ -90,7 +90,7 @@ router.post('/:id/check', authenticateToken, requireAdmin, async (req, res) => {
                         const sshMatch = repo.path.match(/^ssh:\/\/([^@]+)@([^:\/]+)(?::(\d+))?(.*)$/);
                         if (sshMatch) {
                             const port = sshMatch[3] || '22';
-                            env.BORG_RSH = `ssh -i ${tempKeyPath} -p ${port} -o StrictHostKeyChecking=accept-new`;
+                            env.BORG_RSH = `ssh -i ${tempKeyPath} -o IdentitiesOnly=yes -p ${port} -o StrictHostKeyChecking=accept-new`;
                             console.log(`🔑 [operations.js] Using SSH key authentication`);
                         }
                     }
@@ -249,7 +249,7 @@ router.post('/:id/compact', authenticateToken, requireAdmin, async (req, res) =>
                         const sshMatch = repo.path.match(/^ssh:\/\/([^@]+)@([^:\/]+)(?::(\d+))?(.*)$/);
                         if (sshMatch) {
                             const port = sshMatch[3] || '22';
-                            env.BORG_RSH = `ssh -i ${tempKeyPath} -p ${port} -o StrictHostKeyChecking=accept-new`;
+                            env.BORG_RSH = `ssh -i ${tempKeyPath} -o IdentitiesOnly=yes -p ${port} -o StrictHostKeyChecking=accept-new`;
                             console.log(`🔑 [operations.js] Using SSH key authentication`);
                         }
                     }
@@ -422,7 +422,7 @@ router.get('/:id/stats', authenticateToken, requireAdmin, async (req, res) => {
                         // host-key confirmation (would hang the request indefinitely).
                         // ConnectTimeout caps the TCP handshake at a few seconds so
                         // unreachable hosts fail fast instead of stalling the page.
-                        env.BORG_RSH = `ssh -i ${tempKeyPath} -p ${port} -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2`;
+                        env.BORG_RSH = `ssh -i ${tempKeyPath} -o IdentitiesOnly=yes -p ${port} -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2`;
                         console.log(`🔑 [Stats] Using SSH key authentication`);
                     }
                 } catch (sshError) {

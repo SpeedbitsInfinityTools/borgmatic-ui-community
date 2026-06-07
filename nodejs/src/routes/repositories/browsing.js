@@ -659,7 +659,10 @@ async function browseSftp(host, port, username, authMethod, sshKey, ssh_password
             } else {
                 sftpArgs = ['sftp'];
             }
-            sftpArgs.push('-i', tempKeyPath);
+            // IdentitiesOnly=yes: offer ONLY the selected key (see ssh-browse
+            // note) so the remote sshd doesn't log a "Failed publickey" per
+            // mounted /root/.ssh key and trip fail2ban.
+            sftpArgs.push('-i', tempKeyPath, '-o', 'IdentitiesOnly=yes');
         } else {
             env.SSHPASS = ssh_password;
             sftpArgs = ['sshpass', '-e', 'sftp'];
@@ -866,12 +869,19 @@ router.post('/ssh-browse', authenticateToken, requireAdmin, async (req, res) => 
                 tempKeyPath = path.join('/tmp', `ssh-browse-${Date.now()}`);
                 await fs.writeFile(tempKeyPath, sshKey.private_key, { mode: 0o600 });
 
-                // If key is encrypted, we need passphrase
+                // IdentitiesOnly=yes is CRITICAL: without it, ssh offers every
+                // key it can find (the container mounts /root/.ssh) BEFORE the
+                // one we selected with -i. Each rejected key logs a
+                // "Failed publickey" line on the remote sshd, and since the
+                // browser opens several short-lived connections per click, that
+                // flood trips fail2ban and bans the user after a folder or two.
+                // Restricting auth to exactly the chosen key means one clean,
+                // successful auth per connection and nothing for fail2ban to count.
                 if (sshKey.is_encrypted && sshKey.passphrase) {
                     env.SSHPASS = sshKey.passphrase;
-                    sshCmd = ['sshpass', '-e', 'ssh', '-i', tempKeyPath];
+                    sshCmd = ['sshpass', '-e', 'ssh', '-i', tempKeyPath, '-o', 'IdentitiesOnly=yes'];
                 } else {
-                    sshCmd = ['ssh', '-i', tempKeyPath];
+                    sshCmd = ['ssh', '-i', tempKeyPath, '-o', 'IdentitiesOnly=yes'];
                 }
             } else {
                 // Use sshpass for password auth
@@ -1158,7 +1168,10 @@ async function createFolderSftp(host, port, username, authMethod, sshKey, ssh_pa
             } else {
                 sftpArgs = ['sftp'];
             }
-            sftpArgs.push('-i', tempKeyPath);
+            // IdentitiesOnly=yes: offer ONLY the selected key (see ssh-browse
+            // note) so the remote sshd doesn't log a "Failed publickey" per
+            // mounted /root/.ssh key and trip fail2ban.
+            sftpArgs.push('-i', tempKeyPath, '-o', 'IdentitiesOnly=yes');
         } else {
             env.SSHPASS = ssh_password;
             sftpArgs = ['sshpass', '-e', 'sftp'];
@@ -1315,11 +1328,14 @@ router.post('/ssh-create-folder', authenticateToken, requireAdmin, async (req, r
                 tempKeyPath = path.join('/tmp', `ssh-create-${Date.now()}`);
                 await fs.writeFile(tempKeyPath, sshKey.private_key, { mode: 0o600 });
 
+                // IdentitiesOnly=yes — offer only the selected key (see the
+                // ssh-browse note) so rejected /root/.ssh keys don't pile up
+                // "Failed publickey" lines and trip fail2ban.
                 if (sshKey.is_encrypted && sshKey.passphrase) {
                     env.SSHPASS = sshKey.passphrase;
-                    sshCmd = ['sshpass', '-e', 'ssh', '-i', tempKeyPath];
+                    sshCmd = ['sshpass', '-e', 'ssh', '-i', tempKeyPath, '-o', 'IdentitiesOnly=yes'];
                 } else {
-                    sshCmd = ['ssh', '-i', tempKeyPath];
+                    sshCmd = ['ssh', '-i', tempKeyPath, '-o', 'IdentitiesOnly=yes'];
                 }
             } else {
                 env.SSHPASS = ssh_password;

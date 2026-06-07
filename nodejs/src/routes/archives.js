@@ -1418,7 +1418,7 @@ router.get('/:repositoryPath(*)', authenticateToken, async (req, res) => {
                             const sshMatch = repositoryPath.match(/^ssh:\/\/([^@]+)@([^:\/]+)(?::(\d+))?(.*)$/);
                             if (sshMatch) {
                                 const port = sshMatch[3] || '22';
-                                env.BORG_RSH = `ssh -i ${tempKeyPath} -p ${port} -o StrictHostKeyChecking=accept-new`;
+                                env.BORG_RSH = `ssh -i ${tempKeyPath} -o IdentitiesOnly=yes -p ${port} -o StrictHostKeyChecking=accept-new`;
                                 console.log(`🔑 [Archives] Using SSH key authentication`);
                             }
                         }

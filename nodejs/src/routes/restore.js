@@ -255,9 +255,9 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
                                 env.SSH_ASKPASS = askpassScript;
                                 env.SSH_ASKPASS_REQUIRE = 'force';
                                 env.DISPLAY = ':0';
-                                env.BORG_RSH = `ssh -i ${keyPath} -o StrictHostKeyChecking=accept-new -p ${port}`;
+                                env.BORG_RSH = `ssh -i ${keyPath} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -p ${port}`;
                             } else {
-                                env.BORG_RSH = `ssh -i ${keyPath} -o StrictHostKeyChecking=accept-new -o BatchMode=yes -p ${port}`;
+                                env.BORG_RSH = `ssh -i ${keyPath} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o BatchMode=yes -p ${port}`;
                             }
                             console.log(`🔑 [Download] Using SSH key authentication`);
                         }
@@ -553,9 +553,9 @@ async function executeRestore(jobId, restoreJob) {
                                 env.SSH_ASKPASS = askpassScript;
                                 env.SSH_ASKPASS_REQUIRE = 'force';
                                 env.DISPLAY = ':0';
-                                env.BORG_RSH = `ssh -i ${keyPath} -o StrictHostKeyChecking=accept-new -p ${port}`;
+                                env.BORG_RSH = `ssh -i ${keyPath} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -p ${port}`;
                             } else {
-                                env.BORG_RSH = `ssh -i ${keyPath} -o StrictHostKeyChecking=accept-new -o BatchMode=yes -p ${port}`;
+                                env.BORG_RSH = `ssh -i ${keyPath} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o BatchMode=yes -p ${port}`;
                             }
                             console.log(`🔑 [Restore] Using SSH key authentication`);
                         }
@@ -1145,9 +1145,9 @@ router.post('/to-path', authenticateToken, requireAdmin, async (req, res) => {
                                 env.SSH_ASKPASS = askpassScript;
                                 env.SSH_ASKPASS_REQUIRE = 'force';
                                 env.DISPLAY = ':0';
-                                env.BORG_RSH = `ssh -i ${keyPath} -o StrictHostKeyChecking=accept-new -p ${port}`;
+                                env.BORG_RSH = `ssh -i ${keyPath} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -p ${port}`;
                             } else {
-                                env.BORG_RSH = `ssh -i ${keyPath} -o StrictHostKeyChecking=accept-new -o BatchMode=yes -p ${port}`;
+                                env.BORG_RSH = `ssh -i ${keyPath} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o BatchMode=yes -p ${port}`;
                             }
                             console.log(`🔑 [Restore V2] Using SSH key authentication`);
                         }

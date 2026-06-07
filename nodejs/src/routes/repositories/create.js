@@ -481,9 +481,9 @@ router.post('/', authenticateToken, requireAdmin, async (req, res) => {
                         env.SSH_ASKPASS = askpassScript;
                         env.SSH_ASKPASS_REQUIRE = 'force';
                         env.DISPLAY = ':0';
-                        env.BORG_RSH = `ssh -i ${tempKeyPath} -o StrictHostKeyChecking=accept-new -p ${remotePort}`;
+                        env.BORG_RSH = `ssh -i ${tempKeyPath} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -p ${remotePort}`;
                     } else {
-                        env.BORG_RSH = `ssh -i ${tempKeyPath} -o StrictHostKeyChecking=accept-new -o BatchMode=yes -p ${remotePort}`;
+                        env.BORG_RSH = `ssh -i ${tempKeyPath} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o BatchMode=yes -p ${remotePort}`;
                     }
                 } else {
                     // Password authentication - use sshpass
@@ -500,9 +500,9 @@ router.post('/', authenticateToken, requireAdmin, async (req, res) => {
                         if (authMethod === 'key') {
                             if (sshKey.is_encrypted && sshKey.passphrase) {
                                 env.SSHPASS = sshKey.passphrase;
-                                sftpArgs = ['sshpass', '-e', 'sftp', '-i', tempKeyPath];
+                                sftpArgs = ['sshpass', '-e', 'sftp', '-i', tempKeyPath, '-o', 'IdentitiesOnly=yes'];
                             } else {
-                                sftpArgs = ['sftp', '-i', tempKeyPath];
+                                sftpArgs = ['sftp', '-i', tempKeyPath, '-o', 'IdentitiesOnly=yes'];
                             }
                         } else {
                             sftpArgs = ['sshpass', '-e', 'sftp'];
@@ -536,9 +536,9 @@ router.post('/', authenticateToken, requireAdmin, async (req, res) => {
                         let sshCmd;
                         if (authMethod === 'key') {
                             if (sshKey.is_encrypted && sshKey.passphrase) {
-                                sshCmd = ['sshpass', '-e', 'ssh', '-i', tempKeyPath];
+                                sshCmd = ['sshpass', '-e', 'ssh', '-i', tempKeyPath, '-o', 'IdentitiesOnly=yes'];
                             } else {
-                                sshCmd = ['ssh', '-i', tempKeyPath];
+                                sshCmd = ['ssh', '-i', tempKeyPath, '-o', 'IdentitiesOnly=yes'];
                             }
                         } else {
                             sshCmd = ['sshpass', '-e', 'ssh'];

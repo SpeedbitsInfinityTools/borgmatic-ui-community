@@ -224,11 +224,11 @@ class BackupExecutor {
                                     env.DISPLAY = ':0'; // Required for SSH_ASKPASS (even if no display exists)
                                     
                                     // Note: Don't use BatchMode=yes - it prevents SSH_ASKPASS from being used
-                                    env.BORG_RSH = `ssh -i ${keyPath} -o StrictHostKeyChecking=accept-new -p ${port}`;
+                                    env.BORG_RSH = `ssh -i ${keyPath} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -p ${port}`;
                                     console.log(`🔐 Using SSH key authentication (encrypted key with SSH_ASKPASS) for repository: ${repoPath}`);
                                 } else {
                                     // Non-encrypted key - BatchMode=yes is safe
-                                    env.BORG_RSH = `ssh -i ${keyPath} -o StrictHostKeyChecking=accept-new -o BatchMode=yes -p ${port}`;
+                                    env.BORG_RSH = `ssh -i ${keyPath} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o BatchMode=yes -p ${port}`;
                                     console.log(`🔑 Using SSH key authentication for repository: ${repoPath}`);
                                 }
                             } else {

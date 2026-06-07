@@ -178,7 +178,7 @@ async function discoverSSHRepositories(options) {
             }
 
             const sshIndex = cmd.indexOf('ssh');
-            cmd.splice(sshIndex + 1, 0, '-i', tempKeyPath);
+            cmd.splice(sshIndex + 1, 0, '-i', tempKeyPath, '-o', 'IdentitiesOnly=yes');
         } else if (authMethod === 'password' && sshPassword) {
             try {
                 await execa('which', ['sshpass'], { timeout: 2000 });
@@ -614,7 +614,7 @@ router.post('/test-connection', authenticateToken, requireAdmin, async (req, res
 
                         // Insert -i option after 'ssh' or 'sftp' (or after 'sshpass -e ssh/sftp')
                         const cmdIndex = isHetzner ? cmd.indexOf('sftp') : cmd.indexOf('ssh');
-                        cmd.splice(cmdIndex + 1, 0, '-i', tempKeyPath);
+                        cmd.splice(cmdIndex + 1, 0, '-i', tempKeyPath, '-o', 'IdentitiesOnly=yes');
                     } else {
                         // Test connection with password using sshpass
                         // Check if sshpass is available

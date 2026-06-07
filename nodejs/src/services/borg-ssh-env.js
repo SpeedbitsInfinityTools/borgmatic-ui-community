@@ -180,9 +180,9 @@ async function configureBorgSshEnv(env, repositoryPath, context = 'Borg') {
             // BatchMode cannot be used here: ssh needs SSH_ASKPASS to prompt
             // for the key passphrase. accept-new is safe because there is
             // still no interactive TTY, but the askpass helper is non-tty.
-            env.BORG_RSH = `ssh -i ${keyPath} -o StrictHostKeyChecking=accept-new -p ${port}`;
+            env.BORG_RSH = `ssh -i ${keyPath} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -p ${port}`;
         } else {
-            env.BORG_RSH = `ssh -i ${keyPath} -o StrictHostKeyChecking=accept-new -o BatchMode=yes -p ${port}`;
+            env.BORG_RSH = `ssh -i ${keyPath} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o BatchMode=yes -p ${port}`;
         }
         console.log(`🔑 [${context}] SSH key authentication (source: ${keyInfo.source}, key ${keyInfo.ssh_key_id || 'unnamed'})`);
         return { method: 'key', source: keyInfo.source, ssh_key_id: keyInfo.ssh_key_id };

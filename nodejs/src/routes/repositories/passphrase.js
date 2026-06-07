@@ -80,7 +80,7 @@ router.post('/:repoId/passphrase', authenticateToken, requireAdmin, async (req, 
                             const port = urlMatch?.[1] || '22';
 
                             // Set BORG_RSH to use the SSH key
-                            env.BORG_RSH = `ssh -i ${tempKeyPath} -p ${port} -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=30`;
+                            env.BORG_RSH = `ssh -i ${tempKeyPath} -o IdentitiesOnly=yes -p ${port} -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=30`;
                             console.log(`🔑 [Repos] Using SSH key for verification: ${tempKeyPath}`);
                         }
                     } catch (sshError) {
@@ -312,7 +312,7 @@ router.get('/:repoId/passphrase/verify', authenticateToken, requireAdmin, async 
                         const port = urlMatch?.[1] || '22';
 
                         // Set BORG_RSH to use the SSH key
-                        env.BORG_RSH = `ssh -i ${tempKeyPath} -p ${port} -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=30`;
+                        env.BORG_RSH = `ssh -i ${tempKeyPath} -o IdentitiesOnly=yes -p ${port} -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=30`;
                         console.log(`🔑 [Repos] Using SSH key for verification: ${tempKeyPath}`);
                     }
                 } catch (sshError) {
