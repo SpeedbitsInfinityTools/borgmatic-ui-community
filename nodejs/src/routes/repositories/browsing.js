@@ -83,6 +83,24 @@ function parseSSHError(stderr, stdout = '') {
     return 'SSH connection failed - check your credentials and connection settings';
 }
 
+// Per-credential ControlMaster socket path.
+//
+// SECURITY: the socket MUST be unique per (credential, host, port, user) — not
+// just host/port/user (which is all ssh's %C encodes). If two browse requests
+// to the same user@host use DIFFERENT keys (or key vs. password), a shared
+// socket would let the second request piggyback on the first's authenticated
+// master and skip its own auth — defeating the "use only the selected key"
+// guarantee and blurring credential boundaries (raised in review). We fold a
+// hash of the selected credential into the socket name; ssh's %C still adds
+// host/port/user. Same-credential reuse (the actual benefit) is preserved;
+// cross-credential reuse cannot happen. The credential value is hashed, so no
+// key id or password ever appears in a world-listable /tmp path.
+function browseControlPathOpt(authMethod, keyId, password) {
+    const credString = authMethod === 'key' ? `key:${keyId || ''}` : `pw:${password || ''}`;
+    const tag = require('crypto').createHash('sha256').update(credString).digest('hex').slice(0, 16);
+    return `/tmp/borgui-cm-${tag}-%C`;
+}
+
 // ============================================================================
 // Rclone CLI Endpoints (no RCD required)
 // ============================================================================
@@ -668,12 +686,19 @@ async function browseSftp(host, port, username, authMethod, sshKey, ssh_password
             sftpArgs = ['sshpass', '-e', 'sftp'];
         }
 
-        // Add SFTP options
+        // Add SFTP options.
+        // ControlMaster lets rapid successive browses reuse one authenticated
+        // session instead of a fresh TCP+auth per click (keyed on host/port/user
+        // via %C — it even shares the master created by the SSH browse path).
+        // Cuts connection churn on the remote sshd so fail2ban isn't tickled.
         sftpArgs.push(
             '-oStrictHostKeyChecking=accept-new',
             '-oUserKnownHostsFile=/dev/null',
             '-oConnectTimeout=10',
             '-oBatchMode=no',
+            '-oControlMaster=auto',
+            `-oControlPath=${browseControlPathOpt(authMethod, sshKey && sshKey.id, ssh_password)}`,
+            '-oControlPersist=20',
             '-P', port.toString(),
             `${username}@${host}`
         );
@@ -888,6 +913,23 @@ router.post('/ssh-browse', authenticateToken, requireAdmin, async (req, res) => 
                 env.SSHPASS = ssh_password;
                 sshCmd = ['sshpass', '-e', 'ssh'];
             }
+
+            // CRITICAL (fail2ban): reuse ONE SSH connection for every command this
+            // browse runs. A single ssh-browse opens multiple short-lived sessions
+            // (the `ls`, the home lookup, and the Borg-repo probe), and on some
+            // setups one of those secondary sessions ends up doing password auth —
+            // producing "Failed password" lines on the remote sshd that ban the
+            // user after a couple of clicks. ControlMaster authenticates ONCE and
+            // multiplexes every later command over that master socket (no new TCP,
+            // no re-auth). ControlPersist keeps it briefly alive so rapid clicking
+            // reuses it too. Keyed on host/port/user (%C), so distinct sources keep
+            // separate masters. If the socket can't be created, ssh falls back to a
+            // normal connection — so this is safe.
+            sshCmd.push(
+                '-o', 'ControlMaster=auto',
+                '-o', `ControlPath=${browseControlPathOpt(authMethod, ssh_key_id, ssh_password)}`,
+                '-o', 'ControlPersist=20'
+            );
 
             // Default to user's home directory if path is empty or not provided
             // But allow "/" to be browsed directly (especially for root users)
@@ -1177,12 +1219,16 @@ async function createFolderSftp(host, port, username, authMethod, sshKey, ssh_pa
             sftpArgs = ['sshpass', '-e', 'sftp'];
         }
 
-        // Add SFTP options
+        // Add SFTP options (ControlMaster reuses the browse session; see the
+        // browseSftp note — keeps connection churn off the remote sshd/fail2ban).
         sftpArgs.push(
             '-oStrictHostKeyChecking=accept-new',
             '-oUserKnownHostsFile=/dev/null',
             '-oConnectTimeout=10',
             '-oBatchMode=no',
+            '-oControlMaster=auto',
+            `-oControlPath=${browseControlPathOpt(authMethod, sshKey && sshKey.id, ssh_password)}`,
+            '-oControlPersist=20',
             '-P', port.toString(),
             `${username}@${host}`
         );
@@ -1342,11 +1388,17 @@ router.post('/ssh-create-folder', authenticateToken, requireAdmin, async (req, r
                 sshCmd = ['sshpass', '-e', 'ssh'];
             }
 
-            // Create directory with mkdir -p (creates parent directories if needed)
+            // Create directory with mkdir -p (creates parent directories if needed).
+            // ControlMaster reuses the browse's authenticated session (same %C),
+            // so creating a folder doesn't open an extra connection to the remote
+            // sshd — see the browse note re: fail2ban.
             sshCmd.push(
                 '-o', 'StrictHostKeyChecking=accept-new',
                 '-o', 'UserKnownHostsFile=/dev/null',
                 '-o', 'ConnectTimeout=10',
+                '-o', 'ControlMaster=auto',
+                '-o', `ControlPath=${browseControlPathOpt(authMethod, ssh_key_id, ssh_password)}`,
+                '-o', 'ControlPersist=20',
                 '-p', port.toString(),
                 `${username}@${host}`,
                 `mkdir -p "${remote_path}" && echo "SUCCESS"`
