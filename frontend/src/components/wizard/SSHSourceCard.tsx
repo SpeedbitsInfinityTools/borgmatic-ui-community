@@ -45,6 +45,15 @@ interface SshfsStatus {
     checked: boolean;
     available: boolean;
     error: string | null;
+    // Distinguishes the two failure modes so we can show the right fix:
+    //   binaryAvailable === false  → sshfs not installed (bare-metal/dev host)
+    //   fuseDeviceAvailable === false → FUSE not enabled for the container
+    //     (the Infinity Tools opt-in / BORGUI_ENABLE_FUSE was not turned on)
+    binaryAvailable: boolean;
+    fuseDeviceAvailable: boolean;
+    // Optional hardening signal from backend probe: if false, /dev/fuse may
+    // be mounted but SYS_ADMIN is missing, so sshfs mounts can still fail.
+    sysAdminCapAvailable: boolean;
 }
 
 const DOCKER_FUSE_HINT = `# Add these to your borgmatic-ui container in docker-compose.yml:
@@ -106,7 +115,7 @@ const SSHSourceCard: React.FC<SSHSourceCardProps> = ({
     const [showPassword, setShowPassword] = useState(false);
     const [showBrowser, setShowBrowser] = useState(false);
     const [testResult, setTestResult] = useState<TestResult>({ status: 'idle', message: '' });
-    const [sshfsStatus, setSshfsStatus] = useState<SshfsStatus>({ checked: false, available: true, error: null });
+    const [sshfsStatus, setSshfsStatus] = useState<SshfsStatus>({ checked: false, available: true, error: null, binaryAvailable: true, fuseDeviceAvailable: true, sysAdminCapAvailable: true });
     const [bannerDismissed, setBannerDismissed] = useState(false);
     const [selectedHintId, setSelectedHintId] = useState('debian');
     const [showDockerHint, setShowDockerHint] = useState(false);
@@ -132,11 +141,17 @@ const SSHSourceCard: React.FC<SSHSourceCardProps> = ({
                     checked: true,
                     available: !!data?.available,
                     error: data?.error || null,
+                    // Older backends don't return these fields; default them to
+                    // true so we fall back to the generic (binary) messaging
+                    // rather than wrongly claiming FUSE is disabled.
+                    binaryAvailable: data?.binary_available !== false,
+                    fuseDeviceAvailable: data?.fuse_device_available !== false,
+                    sysAdminCapAvailable: data?.sys_admin_cap_available !== false,
                 });
                 return !!data?.available;
             })
             .catch(() => {
-                setSshfsStatus({ checked: true, available: true, error: null });
+                setSshfsStatus({ checked: true, available: true, error: null, binaryAvailable: true, fuseDeviceAvailable: true, sysAdminCapAvailable: true });
                 return true;
             });
     };
@@ -156,9 +171,9 @@ const SSHSourceCard: React.FC<SSHSourceCardProps> = ({
             const ok = await probeSshfs(true);
             if (ok) {
                 setBannerDismissed(false);
-                toast.success('sshfs is now available on the backend');
+                toast.success('SSH/SFTP sources are now available (sshfs + FUSE detected)');
             } else {
-                toast.error('sshfs is still not available on the backend');
+                toast.error('Still not available — sshfs and/or FUSE (/dev/fuse) are missing on the backend');
             }
         } finally {
             setRecheckingSshfs(false);
@@ -233,6 +248,12 @@ const SSHSourceCard: React.FC<SSHSourceCardProps> = ({
     };
 
     const showBanner = sshfsStatus.checked && !sshfsStatus.available && !bannerDismissed;
+    // The sshfs binary ships in our image, so on a normal deployment the only
+    // thing that can be missing is FUSE access (the Infinity Tools opt-in). In
+    // that case we show the "enable FUSE / reinstall" guidance instead of the
+    // host package-install instructions (which are only relevant on
+    // bare-metal/dev hosts where the binary itself is absent).
+    const fuseDisabledOnly = sshfsStatus.binaryAvailable && (!sshfsStatus.fuseDeviceAvailable || !sshfsStatus.sysAdminCapAvailable);
 
     return (
         <div className="border border-gray-200 rounded-lg p-3 bg-white hover:border-gray-300 transition-colors">
@@ -240,6 +261,47 @@ const SSHSourceCard: React.FC<SSHSourceCardProps> = ({
                 <div className="mb-3 flex items-start gap-2 p-3 bg-amber-50 border border-amber-300 rounded-lg text-xs text-amber-900">
                     <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
                     <div className="flex-1 min-w-0">
+                    {fuseDisabledOnly ? (
+                        <>
+                            <p className="font-semibold mb-1">FUSE is not enabled for this container</p>
+                            <p className="mb-2">
+                                SSH/SFTP sources mount the remote folder with <span className="font-mono">sshfs</span>, which needs FUSE
+                                (<span className="font-mono">/dev/fuse</span>). This deployment was created without FUSE access, so the
+                                backup would fail when it tries to mount.
+                            </p>
+                            <p className="mb-2 text-[11px] text-amber-800">
+                                To enable it, re-run the <span className="font-semibold">Infinity Tools</span> installer for the borgmatic-ui
+                                client and answer <span className="font-semibold">Yes</span> to
+                                <span className="italic"> &ldquo;Enable SSH/SFTP backup sources&rdquo;</span>. For unattended installs,
+                                set <span className="font-mono">BORGUI_ENABLE_FUSE=true</span> instead. Then redeploy the container.
+                            </p>
+                            <p className="mb-2 text-[11px] text-amber-800">
+                                This can&rsquo;t be switched on from here — granting FUSE recreates the container with extra privileges
+                                (<span className="font-mono">/dev/fuse</span> + <span className="font-mono">SYS_ADMIN</span>), which only the installer can do.
+                            </p>
+                            <div className="mt-2 flex items-center gap-3 flex-wrap">
+                                <button
+                                    type="button"
+                                    onClick={handleRecheckSshfs}
+                                    disabled={recheckingSshfs}
+                                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-900 bg-amber-200 hover:bg-amber-300 border border-amber-400 rounded px-2 py-0.5 transition-colors disabled:opacity-60"
+                                    title="Re-check FUSE availability after redeploying with it enabled"
+                                >
+                                    {recheckingSshfs ? (
+                                        <>
+                                            <Loader2 className="w-3 h-3 animate-spin" /> Re-checking…
+                                        </>
+                                    ) : (
+                                        <>Re-check now</>
+                                    )}
+                                </button>
+                                <span className="text-[11px] text-amber-800">
+                                    After redeploying with FUSE enabled, click Re-check.
+                                </span>
+                            </div>
+                        </>
+                    ) : (
+                        <>
                         <p className="font-semibold mb-1">sshfs is not available on the backend</p>
                         <p className="mb-2">
                             {sshfsStatus.error || 'Install sshfs on the machine/container running borgmatic before using SSH/SFTP sources.'}
@@ -314,7 +376,9 @@ const SSHSourceCard: React.FC<SSHSourceCardProps> = ({
                                     </p>
                                     <pre className="bg-amber-100 border border-amber-200 rounded p-2 overflow-auto text-[11px] font-mono whitespace-pre">{DOCKER_FUSE_HINT}</pre>
                                     <p className="mt-1 text-[11px] text-amber-800">
-                                        The project compose files now include these FUSE flags by default.
+                                        These flags are opt-in. Enable them in the Infinity Tools installer via
+                                        <span className="italic"> &ldquo;Enable SSH/SFTP backup sources&rdquo;</span>
+                                        (or set <span className="font-mono">BORGUI_ENABLE_FUSE=true</span> for unattended installs).
                                     </p>
                                     <button
                                         type="button"
@@ -326,6 +390,8 @@ const SSHSourceCard: React.FC<SSHSourceCardProps> = ({
                                 </div>
                             )}
                         </div>
+                        </>
+                    )}
                     </div>
                     <button
                         type="button"
@@ -557,6 +623,11 @@ const SSHSourceCard: React.FC<SSHSourceCardProps> = ({
                         </p>
                         <p className="mt-1 text-teal-700">
                             For an always-on remote folder, use the <span className="font-semibold">Rclone UI</span> app and add the resulting folder as a Local Directory.
+                        </p>
+                        <p className="mt-1 text-teal-700">
+                            <span className="font-semibold">Requires FUSE.</span> sshfs mounts need FUSE enabled for the container. With the
+                            Infinity Tools installer, answer <span className="font-semibold">Yes</span> to
+                            <span className="italic"> &ldquo;Enable SSH/SFTP backup sources&rdquo;</span> (or set <span className="font-mono">BORGUI_ENABLE_FUSE=true</span>). If it&rsquo;s off, reinstall the client with that option enabled.
                         </p>
                     </div>
                 </div>

@@ -183,6 +183,12 @@ router.get('/sshfs-status', authenticateToken, requireAdmin, async (req, res) =>
             data: {
                 available: status.available,
                 error: status.error,
+                // Distinguishes "sshfs binary missing" (install it) from
+                // "FUSE device missing" (enable FUSE in the installer) so the
+                // UI can show the right remediation.
+                binary_available: status.binary_available,
+                fuse_device_available: status.fuse_device_available,
+                sys_admin_cap_available: status.sys_admin_cap_available,
             },
         });
     } catch (error) {

@@ -20,6 +20,7 @@
  */
 
 const { execSync } = require('child_process');
+const fs = require('fs');
 
 // TTLs are intentionally asymmetric:
 //   - Positive results are cached for a long time because once sshfs is
@@ -30,21 +31,38 @@ const { execSync } = require('child_process');
 //     reload without having to restart the borgmatic-ui backend.
 const POSITIVE_TTL_MS = 5 * 60 * 1000;
 const NEGATIVE_TTL_MS = 10 * 1000;
+const SYS_ADMIN_CAP_BIT = 21n;
 
 let sshfsAvailableCache = null; // { value: { available, error }, expiresAt: number }
 
 /**
- * Detect whether `sshfs` is callable on the backend host. Result is cached
- * with TTLs that are short enough for newly-installed sshfs binaries to be
- * picked up without restarting the backend process.
+ * Detect whether SSH/SFTP sources can actually be mounted on the backend host.
+ *
+ * There are TWO independent prerequisites, and both must hold:
+ *
+ *   1. The `sshfs` binary must be installed. It ships in our Docker image, but
+ *      can be absent on bare-metal / dev hosts.
+ *   2. The FUSE device `/dev/fuse` must be present in the container. This only
+ *      happens when the deployment was granted FUSE access — i.e. the
+ *      Infinity Tools installer's "Enable SSH/SFTP backup sources" prompt
+ *      (or BORGUI_ENABLE_FUSE=true), which adds `cap_add: SYS_ADMIN` +
+ *      `devices: /dev/fuse` to the container. Without the device, the sshfs
+ *      binary exists but every mount fails at runtime with
+ *      "fusermount: device not found" / permission denied.
+ *
+ * Checking only the binary (as a previous version did) gives a false "OK" on
+ * containers where FUSE was never enabled — which is exactly the opt-in default
+ * now — so we check both and report which prerequisite is missing.
+ *
+ * Result is cached with TTLs short enough that a freshly-enabled FUSE / newly
+ * installed sshfs is picked up without restarting the backend process.
  *
  * Pass `{ force: true }` to bypass the cache (used by the API route's
- * "?refresh=1" query parameter so the user can manually re-check after
- * installing sshfs).
+ * "?refresh=1" query parameter).
  *
  * @param {object} [opts]
  * @param {boolean} [opts.force=false]
- * @returns {{ available: boolean, error: string|null }}
+ * @returns {{ available: boolean, error: string|null, binary_available: boolean, fuse_device_available: boolean, sys_admin_cap_available: boolean|null }}
  */
 function isSshfsAvailable(opts) {
     const force = !!(opts && opts.force);
@@ -56,16 +74,58 @@ function isSshfsAvailable(opts) {
     ) {
         return sshfsAvailableCache.value;
     }
-    let value;
+
+    let binaryAvailable = false;
     try {
         execSync('command -v sshfs', { stdio: 'ignore' });
-        value = { available: true, error: null };
-    } catch (e) {
-        value = {
-            available: false,
-            error: 'sshfs binary not found on the host running borgmatic.',
-        };
+        binaryAvailable = true;
+    } catch (_) {
+        binaryAvailable = false;
     }
+
+    // /dev/fuse must exist or sshfs mounts cannot work at all.
+    let fuseDeviceAvailable = false;
+    try {
+        fuseDeviceAvailable = fs.existsSync('/dev/fuse');
+    } catch (_) {
+        fuseDeviceAvailable = false;
+    }
+
+    // Harden the probe: some custom/manual deployments can expose /dev/fuse but
+    // still lack SYS_ADMIN in the container capability bounding set.
+    // That can still fail at mount time, so treat it as unavailable.
+    let sysAdminCapAvailable = null;
+    try {
+        const procStatus = fs.readFileSync('/proc/self/status', 'utf8');
+        const capBndMatch = procStatus.match(/^CapBnd:\s*([0-9a-fA-F]+)\s*$/m);
+        if (capBndMatch && capBndMatch[1]) {
+            const capMask = BigInt(`0x${capBndMatch[1]}`);
+            sysAdminCapAvailable = (capMask & (1n << SYS_ADMIN_CAP_BIT)) !== 0n;
+        }
+    } catch (_) {
+        // Keep null when unreadable/unknown so we don't risk false negatives.
+        sysAdminCapAvailable = null;
+    }
+
+    let error = null;
+    if (!binaryAvailable && !fuseDeviceAvailable) {
+        error = 'sshfs is not installed and FUSE (/dev/fuse) is not available on the host running borgmatic.';
+    } else if (!binaryAvailable) {
+        error = 'sshfs binary not found on the host running borgmatic.';
+    } else if (!fuseDeviceAvailable) {
+        error = 'FUSE (/dev/fuse) is not available to this container. SSH/SFTP sources require FUSE to be enabled for the borgmatic-ui container.';
+    } else if (sysAdminCapAvailable === false) {
+        error = 'FUSE device is present but container capability SYS_ADMIN is missing. Reinstall/redeploy borgmatic-ui with "Enable SSH/SFTP backup sources" (or BORGUI_ENABLE_FUSE=true).';
+    }
+
+    const value = {
+        available: binaryAvailable && fuseDeviceAvailable && sysAdminCapAvailable !== false,
+        error,
+        binary_available: binaryAvailable,
+        fuse_device_available: fuseDeviceAvailable,
+        sys_admin_cap_available: sysAdminCapAvailable,
+    };
+
     sshfsAvailableCache = {
         value,
         expiresAt: now + (value.available ? POSITIVE_TTL_MS : NEGATIVE_TTL_MS),
@@ -170,12 +230,14 @@ function buildSshfsMountScript(opts) {
         ? mountOptions.slice()
         : defaultMountOptions();
 
-    // Add IdentityFile reference for key auth — the script writes the key
-    // material to $KEYFILE before invoking sshfs.
-    if (authMethod === 'key') {
-        optsList.push('IdentityFile=$KEYFILE');
-    }
-
+    // NOTE: IdentityFile is intentionally NOT added to optsList here. optsList
+    // is rendered into the script as a single-quoted OPTS='...' assignment, so
+    // any '$KEYFILE' embedded in it would be stored literally and never expand
+    // (bash does not re-scan a variable's value for further expansion). For key
+    // auth the script instead passes IdentityFile as a SEPARATE, double-quoted
+    // `-o "IdentityFile=$KEYFILE"` argument after $KEYFILE is defined, so the
+    // real temp-key path is used. (Previously this produced a literal
+    // "IdentityFile=$KEYFILE" and silently broke key-based sshfs mounts.)
     const optsStr = optsList.join(',');
     const portNum = Number.isInteger(port) ? port : 22;
 
@@ -229,7 +291,9 @@ mkdir -p "$MOUNT_POINT"
 if mountpoint -q "$MOUNT_POINT"; then
   fusermount -uz "$MOUNT_POINT" 2>/dev/null || true
 fi
-sshfs -p "$PORT" -o "$OPTS" "$USER_NAME@$HOST:$REMOTE_PATH" "$MOUNT_POINT"
+# IdentityFile is passed as its own -o so "$KEYFILE" expands to the real temp
+# key path (it cannot live inside the single-quoted $OPTS — see sshfs-helpers).
+sshfs -p "$PORT" -o "$OPTS" -o "IdentityFile=$KEYFILE" "$USER_NAME@$HOST:$REMOTE_PATH" "$MOUNT_POINT"
 # Hard-verify: sshfs has been known to return 0 even when the mount didn't
 # actually take. mountpoint(1) is the authoritative check.
 if ! mountpoint -q "$MOUNT_POINT"; then

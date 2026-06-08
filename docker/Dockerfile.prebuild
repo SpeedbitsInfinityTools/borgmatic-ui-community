@@ -91,6 +91,10 @@ RUN apk add --no-cache \
     sed \
     openssh-client \
     sshpass \
+    # sshfs: required by the SSH/SFTP backup source (mounts remote path via a
+    # borgmatic before-hook). Without it the hook fails with "sshfs: not found"
+    # (exit 127). MUST stay in lockstep with docker/Dockerfile + Dockerfile.dev.
+    sshfs \
     bzip2 \
     unzip \
     # su-exec for dropping privileges in entrypoint (Alpine's gosu)
