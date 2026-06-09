@@ -23,6 +23,9 @@ interface SSHBrowserModalProps {
   sshKeyId?: string | number | null;
   sshAuthMethod?: 'key' | 'password';
   sshPassword?: string;
+  // Initial transport for browsing. Lets the caller (e.g. the SSH source card)
+  // open the browser in the same mode the user selected for Test/backup.
+  initialUseSftp?: boolean;
   currentPath?: string;
   onSelectPath: (path: string) => void;
   onClose: () => void;
@@ -44,6 +47,7 @@ const SSHBrowserModal: React.FC<SSHBrowserModalProps> = ({
   sshKeyId,
   sshAuthMethod = 'key',
   sshPassword,
+  initialUseSftp = false,
   currentPath,
   onSelectPath,
   onClose,
@@ -62,7 +66,7 @@ const SSHBrowserModal: React.FC<SSHBrowserModalProps> = ({
   const [newFolderName, setNewFolderName] = useState('');
   const [searchFilter, setSearchFilter] = useState('');
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
-  const [useSftpMode, setUseSftpMode] = useState(false);
+  const [useSftpMode, setUseSftpMode] = useState(!!initialUseSftp);
   const [sftpModeNote, setSftpModeNote] = useState<string | null>(null);
 
   // Auto-detect Hetzner Storage Boxes and other SFTP-only servers
@@ -80,8 +84,10 @@ const SSHBrowserModal: React.FC<SSHBrowserModalProps> = ({
       setNewFolderName('');
       setSearchFilter('');
       setSftpModeNote(null);
+      // Reflect the caller's chosen transport each time the modal opens.
+      setUseSftpMode(!!initialUseSftp);
     }
-  }, [isOpen]);
+  }, [isOpen, initialUseSftp]);
 
   const browseSSH = useCallback(async (path: string = '/') => {
     if (!host || !username) {

@@ -181,6 +181,11 @@ const SSHSourceCard: React.FC<SSHSourceCardProps> = ({
     };
 
     const authMethod: 'key' | 'password' = source.auth_method === 'password' ? 'password' : 'key';
+    // Browse/Test transport. The actual backup always mounts via sshfs (which
+    // speaks the SFTP subsystem, not a shell), so SFTP is the correct default
+    // and works with restricted/no-shell backup accounts. "SSH shell" is only
+    // for servers that require interactive shell access for directory listing.
+    const useSftp = source.use_sftp !== false;
     const selectedKey = sshKeys.find((k) => String(k.id) === String(source.ssh_key_id));
     const selectableKeys = sshKeys.filter((k) => !k.is_encrypted);
     const selectedHint = HOST_INSTALL_HINTS.find((hint) => hint.id === selectedHintId) || HOST_INSTALL_HINTS[0];
@@ -220,11 +225,12 @@ const SSHSourceCard: React.FC<SSHSourceCardProps> = ({
             return;
         }
 
-        setTestResult({ status: 'testing', message: 'Connecting...' });
+        setTestResult({ status: 'testing', message: useSftp ? 'Connecting (SFTP)...' : 'Connecting (SSH shell)...' });
         try {
             // We exercise the same code path as the file browser: a successful
-            // SFTP listing of the remote root proves credentials + connectivity
-            // and works for both key auth and password auth in one call.
+            // listing of the remote root proves credentials + connectivity for
+            // both key and password auth. Honour the chosen transport so the
+            // test matches how Browse (and, for SFTP, the backup) will behave.
             const res: any = await repositoriesAPI.sshBrowse({
                 host,
                 port,
@@ -233,7 +239,7 @@ const SSHSourceCard: React.FC<SSHSourceCardProps> = ({
                 ssh_auth_method: authMethod,
                 ssh_password: authMethod === 'password' ? source.ssh_password : undefined,
                 remote_path: source.remote_path && source.remote_path.startsWith('/') ? source.remote_path : '/',
-                use_sftp: false,
+                use_sftp: useSftp,
             });
 
             if (res.data?.success) {
@@ -545,6 +551,30 @@ const SSHSourceCard: React.FC<SSHSourceCardProps> = ({
                     )}
                 </div>
 
+                {/* Connection mode for Browse / Test (the backup itself always uses sshfs/SFTP) */}
+                <div>
+                    <label className="block text-[11px] font-medium text-gray-600 mb-0.5">Browse / Test mode</label>
+                    <div className="flex bg-gray-100 rounded p-0.5 max-w-[220px]">
+                        <button
+                            type="button"
+                            onClick={() => updateSource(index, 'use_sftp', true)}
+                            className={`flex-1 flex items-center justify-center gap-1 px-2 py-1 text-xs rounded transition-colors ${useSftp ? 'bg-white text-teal-700 shadow-sm font-medium' : 'text-gray-600 hover:text-gray-800'}`}
+                        >
+                            <Folder className="w-3 h-3" /> SFTP
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => updateSource(index, 'use_sftp', false)}
+                            className={`flex-1 flex items-center justify-center gap-1 px-2 py-1 text-xs rounded transition-colors ${!useSftp ? 'bg-white text-teal-700 shadow-sm font-medium' : 'text-gray-600 hover:text-gray-800'}`}
+                        >
+                            <Network className="w-3 h-3" /> SSH shell
+                        </button>
+                    </div>
+                    <p className="mt-1 text-[11px] text-gray-500">
+                        The backup always mounts via <span className="font-medium">sshfs (SFTP)</span>, so <span className="font-medium">SFTP</span> is recommended — it also works with restricted/backup accounts that don&rsquo;t allow a shell. Choose <span className="font-medium">SSH shell</span> only if the server needs interactive shell access to list folders.
+                    </p>
+                </div>
+
                 {/* Remote path + browse */}
                 <div>
                     <label className="block text-[11px] font-medium text-gray-600 mb-0.5">Remote Path *</label>
@@ -641,6 +671,7 @@ const SSHSourceCard: React.FC<SSHSourceCardProps> = ({
                 sshKeyId={authMethod === 'key' ? (source.ssh_key_id || undefined) : undefined}
                 sshAuthMethod={authMethod}
                 sshPassword={authMethod === 'password' ? source.ssh_password : undefined}
+                initialUseSftp={useSftp}
                 currentPath={source.remote_path || undefined}
                 onSelectPath={(p) => {
                     updateSource(index, 'remote_path', p);

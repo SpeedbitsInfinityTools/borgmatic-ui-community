@@ -1,6 +1,6 @@
 {
   "name": "speedbits-borgmatic-ui",
-  "version": "1.0.60",
+  "version": "1.0.61",
   "description": "SpeedBits Borgmatic UI - Node.js Backend",
   "main": "src/server.js",
   "scripts": {
