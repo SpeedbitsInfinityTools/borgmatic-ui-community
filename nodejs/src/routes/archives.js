@@ -8,6 +8,7 @@ const passwordManager = require('../services/password-manager');
 const configParser = require('../services/config-parser');
 const repositoryCredentials = require('../services/repository-credentials');
 const { configureBorgSshEnv } = require('../services/borg-ssh-env');
+const { buildBorgPasswordSshArgs } = require('../utils/ssh-password-auth');
 const path = require('path');
 const fs = require('fs-extra');
 const yaml = require('js-yaml');
@@ -1431,7 +1432,11 @@ router.get('/:repositoryPath(*)', authenticateToken, async (req, res) => {
                             if (sshMatch) {
                                 const port = sshMatch[3] || '22';
                                 env.SSHPASS = sshPassword;
-                                env.BORG_RSH = `sshpass -e ssh -p ${port} -o StrictHostKeyChecking=accept-new`;
+                                // Pin to password-only auth so ssh doesn't
+                                // offer /root/.ssh keys first and trip the
+                                // remote fail2ban (see browsing.js
+                                // PASSWORD_AUTH_SSH_FLAGS rationale).
+                                env.BORG_RSH = `sshpass -e ssh -p ${port} ${buildBorgPasswordSshArgs()} -o StrictHostKeyChecking=accept-new`;
                                 console.log(`🔐 [Archives] Using SSH password authentication`);
                             }
                         }

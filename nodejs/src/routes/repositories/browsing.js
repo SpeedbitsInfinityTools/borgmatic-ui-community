@@ -19,6 +19,10 @@ debugLog('🔧 [browsing.js] execa loaded, type:', typeof execa);
 const fs = require('fs-extra');
 const path = require('path');
 const { constructSSHPath } = require('./helpers');
+const {
+    PASSWORD_AUTH_SSH_FLAGS,
+    PASSWORD_AUTH_SFTP_FLAGS,
+} = require('../../utils/ssh-password-auth');
 debugLog('🔧 [browsing.js] constructSSHPath loaded, type:', typeof constructSSHPath);
 
 const rcloneCLI = require('../../services/rclone-cli');
@@ -683,7 +687,7 @@ async function browseSftp(host, port, username, authMethod, sshKey, ssh_password
             sftpArgs.push('-i', tempKeyPath, '-o', 'IdentitiesOnly=yes');
         } else {
             env.SSHPASS = ssh_password;
-            sftpArgs = ['sshpass', '-e', 'sftp'];
+            sftpArgs = ['sshpass', '-e', 'sftp', ...PASSWORD_AUTH_SFTP_FLAGS];
         }
 
         // Add SFTP options.
@@ -909,9 +913,11 @@ router.post('/ssh-browse', authenticateToken, requireAdmin, async (req, res) => 
                     sshCmd = ['ssh', '-i', tempKeyPath, '-o', 'IdentitiesOnly=yes'];
                 }
             } else {
-                // Use sshpass for password auth
+                // Use sshpass for password auth.
+                // PASSWORD_AUTH_SSH_FLAGS pins the connection to password-only
+                // auth so /root/.ssh keys aren't offered first (see flag comment).
                 env.SSHPASS = ssh_password;
-                sshCmd = ['sshpass', '-e', 'ssh'];
+                sshCmd = ['sshpass', '-e', 'ssh', ...PASSWORD_AUTH_SSH_FLAGS];
             }
 
             // CRITICAL (fail2ban): reuse ONE SSH connection for every command this
@@ -1216,7 +1222,7 @@ async function createFolderSftp(host, port, username, authMethod, sshKey, ssh_pa
             sftpArgs.push('-i', tempKeyPath, '-o', 'IdentitiesOnly=yes');
         } else {
             env.SSHPASS = ssh_password;
-            sftpArgs = ['sshpass', '-e', 'sftp'];
+            sftpArgs = ['sshpass', '-e', 'sftp', ...PASSWORD_AUTH_SFTP_FLAGS];
         }
 
         // Add SFTP options (ControlMaster reuses the browse session; see the
@@ -1384,8 +1390,9 @@ router.post('/ssh-create-folder', authenticateToken, requireAdmin, async (req, r
                     sshCmd = ['ssh', '-i', tempKeyPath, '-o', 'IdentitiesOnly=yes'];
                 }
             } else {
+                // Password-only auth (see PASSWORD_AUTH_SSH_FLAGS rationale).
                 env.SSHPASS = ssh_password;
-                sshCmd = ['sshpass', '-e', 'ssh'];
+                sshCmd = ['sshpass', '-e', 'ssh', ...PASSWORD_AUTH_SSH_FLAGS];
             }
 
             // Create directory with mkdir -p (creates parent directories if needed).

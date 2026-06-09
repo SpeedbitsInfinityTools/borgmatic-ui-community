@@ -21,6 +21,7 @@
 
 const { execSync } = require('child_process');
 const fs = require('fs');
+const { buildPasswordSshArgString } = require('../utils/ssh-password-auth');
 
 // TTLs are intentionally asymmetric:
 //   - Positive results are cached for a long time because once sshfs is
@@ -293,7 +294,10 @@ if mountpoint -q "$MOUNT_POINT"; then
 fi
 # IdentityFile is passed as its own -o so "$KEYFILE" expands to the real temp
 # key path (it cannot live inside the single-quoted $OPTS — see sshfs-helpers).
-sshfs -p "$PORT" -o "$OPTS" -o "IdentityFile=$KEYFILE" "$USER_NAME@$HOST:$REMOTE_PATH" "$MOUNT_POINT"
+# IdentitiesOnly=yes: offer ONLY this key — without it ssh also offers every
+# /root/.ssh key, and each rejected one logs "Failed publickey" on the remote
+# sshd, tripping fail2ban (same trap fixed across the browse/borg paths).
+sshfs -p "$PORT" -o "$OPTS" -o "IdentityFile=$KEYFILE" -o IdentitiesOnly=yes "$USER_NAME@$HOST:$REMOTE_PATH" "$MOUNT_POINT"
 # Hard-verify: sshfs has been known to return 0 even when the mount didn't
 # actually take. mountpoint(1) is the authoritative check.
 if ! mountpoint -q "$MOUNT_POINT"; then
@@ -327,8 +331,10 @@ if mountpoint -q "$MOUNT_POINT"; then
   fusermount -uz "$MOUNT_POINT" 2>/dev/null || true
 fi
 # Feed password via sshpass env var (never as CLI argument).
+# Pin to password-only auth so ssh doesn't offer /root/.ssh keys before the
+# password and trip the remote fail2ban (same trap fixed across browse/borg).
 export SSHPASS="$PASS_RAW"
-sshpass -e sshfs -p "$PORT" -o "$OPTS" "$USER_NAME@$HOST:$REMOTE_PATH" "$MOUNT_POINT"
+sshpass -e sshfs -p "$PORT" -o "$OPTS" ${buildPasswordSshArgString()} "$USER_NAME@$HOST:$REMOTE_PATH" "$MOUNT_POINT"
 unset SSHPASS
 unset PASS_RAW
 if ! mountpoint -q "$MOUNT_POINT"; then

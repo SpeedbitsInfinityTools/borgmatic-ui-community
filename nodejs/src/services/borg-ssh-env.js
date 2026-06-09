@@ -34,6 +34,7 @@ const fs = require('fs-extra');
 const config = require('../config');
 const configParser = require('./config-parser');
 const repositoryCredentials = require('./repository-credentials');
+const { buildBorgPasswordSshArgs } = require('../utils/ssh-password-auth');
 
 /**
  * Parse an `ssh://user@host[:port]/path` URL into its components.
@@ -193,7 +194,10 @@ async function configureBorgSshEnv(env, repositoryPath, context = 'Borg') {
         const pw = await repositoryCredentials.getSSHPassword(repositoryPath);
         if (pw) {
             env.SSHPASS = pw;
-            env.BORG_RSH = `sshpass -e ssh -o StrictHostKeyChecking=accept-new -p ${port}`;
+            // Pin to password-only auth so ssh doesn't offer /root/.ssh keys
+            // before the password and trip fail2ban (see browsing.js for the
+            // full PASSWORD_AUTH_SSH_FLAGS rationale).
+            env.BORG_RSH = `sshpass -e ssh ${buildBorgPasswordSshArgs()} -o StrictHostKeyChecking=accept-new -p ${port}`;
             console.log(`🔐 [${context}] SSH password authentication (source: repository-credentials)`);
             return { method: 'password', source: 'credentials' };
         }

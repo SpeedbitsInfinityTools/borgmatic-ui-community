@@ -8,6 +8,7 @@ const fs = require('fs-extra');
 const path = require('path');
 const { execa } = require('execa');
 const { constructSSHPath } = require('./helpers');
+const { PASSWORD_AUTH_SSH_FLAGS } = require('../../utils/ssh-password-auth');
 
 /**
  * Parse SSH error messages to provide user-friendly feedback
@@ -190,6 +191,13 @@ async function discoverSSHRepositories(options) {
             const batchModeIndex = cmd.indexOf('BatchMode=yes');
             if (batchModeIndex > 0) {
                 cmd.splice(batchModeIndex - 1, 2); // Remove -o and BatchMode=yes
+            }
+            // Pin to password-only auth so ssh doesn't offer /root/.ssh keys
+            // first and trip the remote fail2ban (see browsing.js for full
+            // rationale on the publickey-then-password fail2ban trap).
+            const sshIdx = cmd.indexOf('ssh');
+            if (sshIdx >= 0) {
+                cmd.splice(sshIdx + 1, 0, ...PASSWORD_AUTH_SSH_FLAGS);
             }
             cmd.unshift('-e');
             cmd.unshift('sshpass');
@@ -633,6 +641,14 @@ router.post('/test-connection', authenticateToken, requireAdmin, async (req, res
                         const batchModeIndex = cmd.indexOf('BatchMode=yes');
                         if (batchModeIndex > 0) {
                             cmd.splice(batchModeIndex - 1, 2); // Remove -o and BatchMode=yes
+                        }
+                        // Pin to password-only auth so ssh/sftp doesn't offer
+                        // /root/.ssh keys first and trip the remote fail2ban
+                        // (see browsing.js for the full publickey-then-password
+                        // fail2ban-trap rationale).
+                        const sshOrSftpIdx = isHetzner ? cmd.indexOf('sftp') : cmd.indexOf('ssh');
+                        if (sshOrSftpIdx >= 0) {
+                            cmd.splice(sshOrSftpIdx + 1, 0, ...PASSWORD_AUTH_SSH_FLAGS);
                         }
                         // Prepend sshpass -e
                         cmd.unshift('-e');

@@ -15,6 +15,11 @@ const {
     getBorgPath
 } = require('../../services/borg-version-detector');
 const { shellSingleQuote, isSafeRemotePath, testLogFileWrite } = require('./crud-helpers');
+const {
+    PASSWORD_AUTH_SSH_FLAGS,
+    PASSWORD_AUTH_SFTP_FLAGS,
+    buildBorgPasswordSshArgs,
+} = require('../../utils/ssh-password-auth');
 
 /**
  * Create a new repository
@@ -486,9 +491,12 @@ router.post('/', authenticateToken, requireAdmin, async (req, res) => {
                         env.BORG_RSH = `ssh -i ${tempKeyPath} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o BatchMode=yes -p ${remotePort}`;
                     }
                 } else {
-                    // Password authentication - use sshpass
+                    // Password authentication - use sshpass.
+                    // Pin to password-only auth so ssh doesn't offer
+                    // /root/.ssh keys first and trip fail2ban on the remote
+                    // (see browsing.js PASSWORD_AUTH_SSH_FLAGS).
                     env.SSHPASS = ssh_password;
-                    env.BORG_RSH = `sshpass -e ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -p ${remotePort}`;
+                    env.BORG_RSH = `sshpass -e ssh ${buildBorgPasswordSshArgs()} -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -p ${remotePort}`;
                 }
 
                 // For Hetzner, create directory via SFTP first (they don't allow SSH shell commands)
@@ -505,7 +513,11 @@ router.post('/', authenticateToken, requireAdmin, async (req, res) => {
                                 sftpArgs = ['sftp', '-i', tempKeyPath, '-o', 'IdentitiesOnly=yes'];
                             }
                         } else {
-                            sftpArgs = ['sshpass', '-e', 'sftp'];
+                            // Password auth: pin to password-only methods so
+                            // /root/.ssh keys aren't offered first (fail2ban
+                            // trap — see browsing.js PASSWORD_AUTH_SFTP_FLAGS).
+                            // SSHPASS env var is set in the BORG_RSH branch above.
+                            sftpArgs = ['sshpass', '-e', 'sftp', ...PASSWORD_AUTH_SFTP_FLAGS];
                         }
 
                         sftpArgs.push(
@@ -541,7 +553,9 @@ router.post('/', authenticateToken, requireAdmin, async (req, res) => {
                                 sshCmd = ['ssh', '-i', tempKeyPath, '-o', 'IdentitiesOnly=yes'];
                             }
                         } else {
-                            sshCmd = ['sshpass', '-e', 'ssh'];
+                            // Password-only auth (see browsing.js
+                            // PASSWORD_AUTH_SSH_FLAGS — fail2ban-trap fix).
+                            sshCmd = ['sshpass', '-e', 'ssh', ...PASSWORD_AUTH_SSH_FLAGS];
                         }
 
                         sshCmd.push(

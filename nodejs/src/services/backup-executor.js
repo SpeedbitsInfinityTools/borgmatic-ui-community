@@ -7,6 +7,7 @@ const passwordManager = require('./password-manager');
 const logManager = require('./log-manager');
 const notificationRouter = require('./notification-router');
 const fs = require('fs-extra');
+const { buildBorgPasswordSshArgs } = require('../utils/ssh-password-auth');
 
 /**
  * Backup Executor Service
@@ -240,7 +241,10 @@ class BackupExecutor {
                                 // Set ssh_command to use sshpass for password authentication
                                 // Use SSHPASS environment variable instead of command line to avoid password exposure in process list
                                 env.SSHPASS = sshPassword;
-                                env.BORG_RSH = `sshpass -e ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -p ${port}`;
+                                // Pin to password-only auth (see browsing.js
+                                // PASSWORD_AUTH_SSH_FLAGS rationale: prevents
+                                // fail2ban traps from rejected /root/.ssh keys).
+                                env.BORG_RSH = `sshpass -e ssh ${buildBorgPasswordSshArgs()} -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -p ${port}`;
                                 console.log(`🔐 Using SSH password authentication for repository: ${repoPath}`);
                             }
                         }

@@ -12,6 +12,7 @@ const { v4: uuidv4 } = require('uuid');
 const { execa } = require('execa');
 const { exec } = require('child_process');
 const { promisify } = require('util');
+const { buildBorgPasswordSshArgs } = require('../utils/ssh-password-auth');
 const execAsync = promisify(exec);
 
 // In-memory restore job storage (in production, use Redis or database)
@@ -268,7 +269,10 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
                             const sshMatch = repository.match(/^ssh:\/\/([^@]+)@([^:\/]+)(?::(\d+))?(.*)$/);
                             const port = sshMatch?.[3] || '22';
                             env.SSHPASS = sshPassword;
-                            env.BORG_RSH = `sshpass -e ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -p ${port}`;
+                            // Pin to password-only auth (see browsing.js
+                            // PASSWORD_AUTH_SSH_FLAGS — avoids fail2ban trap
+                            // from /root/.ssh keys being offered first).
+                            env.BORG_RSH = `sshpass -e ssh ${buildBorgPasswordSshArgs()} -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -p ${port}`;
                             console.log(`🔐 [Download] Using SSH password authentication`);
                         }
                     }
@@ -566,7 +570,10 @@ async function executeRestore(jobId, restoreJob) {
                             const sshMatch = restoreJob.repository.match(/^ssh:\/\/([^@]+)@([^:\/]+)(?::(\d+))?(.*)$/);
                             const port = sshMatch?.[3] || '22';
                             env.SSHPASS = sshPassword;
-                            env.BORG_RSH = `sshpass -e ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -p ${port}`;
+                            // Pin to password-only auth (see browsing.js
+                            // PASSWORD_AUTH_SSH_FLAGS — avoids fail2ban trap
+                            // from /root/.ssh keys being offered first).
+                            env.BORG_RSH = `sshpass -e ssh ${buildBorgPasswordSshArgs()} -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -p ${port}`;
                             console.log(`🔐 [Restore] Using SSH password authentication`);
                         }
                     }
@@ -1158,7 +1165,10 @@ router.post('/to-path', authenticateToken, requireAdmin, async (req, res) => {
                             const sshMatch = repository.match(/^ssh:\/\/([^@]+)@([^:\/]+)(?::(\d+))?(.*)$/);
                             const port = sshMatch?.[3] || '22';
                             env.SSHPASS = sshPassword;
-                            env.BORG_RSH = `sshpass -e ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -p ${port}`;
+                            // Pin to password-only auth (see browsing.js
+                            // PASSWORD_AUTH_SSH_FLAGS — avoids fail2ban trap
+                            // from /root/.ssh keys being offered first).
+                            env.BORG_RSH = `sshpass -e ssh ${buildBorgPasswordSshArgs()} -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -p ${port}`;
                             console.log(`🔐 [Restore V2] Using SSH password authentication`);
                         }
                     }

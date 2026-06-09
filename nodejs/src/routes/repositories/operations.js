@@ -8,6 +8,7 @@ const repositoryCredentials = require('../../services/repository-credentials');
 const { writeSSHKeyToFilesystem } = require('./helpers');
 const path = require('path');
 const fs = require('fs-extra');
+const { buildBorgPasswordSshArgs } = require('../../utils/ssh-password-auth');
 
 router.post('/:id/check', authenticateToken, requireAdmin, async (req, res) => {
     try {
@@ -103,7 +104,10 @@ router.post('/:id/check', authenticateToken, requireAdmin, async (req, res) => {
                         if (sshMatch) {
                             const port = sshMatch[3] || '22';
                             env.SSHPASS = sshPassword;
-                            env.BORG_RSH = `sshpass -e ssh -p ${port} -o StrictHostKeyChecking=accept-new`;
+                            // Pin to password-only auth (see browsing.js
+                            // PASSWORD_AUTH_SSH_FLAGS rationale: avoids the
+                            // /root/.ssh-keys-offered-first fail2ban trap).
+                            env.BORG_RSH = `sshpass -e ssh -p ${port} ${buildBorgPasswordSshArgs()} -o StrictHostKeyChecking=accept-new`;
                             console.log(`🔐 [operations.js] Using SSH password authentication`);
                         }
                     }
@@ -262,7 +266,10 @@ router.post('/:id/compact', authenticateToken, requireAdmin, async (req, res) =>
                         if (sshMatch) {
                             const port = sshMatch[3] || '22';
                             env.SSHPASS = sshPassword;
-                            env.BORG_RSH = `sshpass -e ssh -p ${port} -o StrictHostKeyChecking=accept-new`;
+                            // Pin to password-only auth (see browsing.js
+                            // PASSWORD_AUTH_SSH_FLAGS rationale: avoids the
+                            // /root/.ssh-keys-offered-first fail2ban trap).
+                            env.BORG_RSH = `sshpass -e ssh -p ${port} ${buildBorgPasswordSshArgs()} -o StrictHostKeyChecking=accept-new`;
                             console.log(`🔐 [operations.js] Using SSH password authentication`);
                         }
                     }
