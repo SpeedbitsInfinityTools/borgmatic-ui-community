@@ -10,6 +10,67 @@ function isUnsafePathInput(p) {
     return typeof p !== 'string' || p.length === 0 || p.includes('\0');
 }
 
+// --- Borg-repo detection (bounded + cached) ------------------------------
+// Detecting whether a directory is a Borg repository requires probing one
+// level deeper (does it contain `config` + `data`?). On local disk this is
+// microseconds, but on a FUSE/cloud mount (e.g. an rclone-mounted Azure blob
+// container) a single existence check can force a full directory enumeration
+// that takes minutes when the directory holds millions of objects. To keep the
+// browse endpoint fast and predictable we (a) only run detection when the
+// caller asks for it, (b) bound every probe with a short timeout, and (c)
+// memoise the result briefly.
+const BORG_DETECT_CACHE_TTL_MS = 5 * 60 * 1000;
+const BORG_DETECT_TIMEOUT_MS = 1500;
+const borgDetectCache = new Map(); // absolutePath -> { result: boolean, ts: number }
+
+function withTimeout(promise, ms) {
+    let timer;
+    const timeout = new Promise((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('probe-timeout')), ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Determine whether `dirPath` is a Borg repository.
+ *
+ * Bounded by BORG_DETECT_TIMEOUT_MS and memoised for BORG_DETECT_CACHE_TTL_MS.
+ * On timeout or any error we return `false` (not "unknown") on purpose: a real
+ * Borg repo root contains only a handful of entries and answers well within the
+ * timeout, whereas the pathological directories that would stall the probe
+ * (millions of files) are never Borg repositories anyway. So a slow backend can
+ * never hang the browse, and we don't produce false negatives in practice.
+ */
+async function detectBorgRepo(dirPath) {
+    const cached = borgDetectCache.get(dirPath);
+    if (cached && (Date.now() - cached.ts) < BORG_DETECT_CACHE_TTL_MS) {
+        return cached.result;
+    }
+
+    let result = false;
+    try {
+        const configFile = path.join(dirPath, 'config');
+        const dataDir = path.join(dirPath, 'data');
+        const [hasConfig, hasData] = await withTimeout(
+            Promise.all([fs.pathExists(configFile), fs.pathExists(dataDir)]),
+            BORG_DETECT_TIMEOUT_MS
+        );
+        if (hasConfig && hasData) {
+            const configContent = await withTimeout(
+                fs.readFile(configFile, 'utf8'),
+                BORG_DETECT_TIMEOUT_MS
+            );
+            result = configContent.includes('[repository]');
+        }
+    } catch (_e) {
+        // Timeout / unreadable / not a repo — treat as not-a-repo (see doc above).
+        result = false;
+    }
+
+    borgDetectCache.set(dirPath, { result, ts: Date.now() });
+    return result;
+}
+
 /**
  * Collect a one-shot snapshot of the current process's identity, capabilities,
  * seccomp/AppArmor profile, and how it sees a given path. Used when the
@@ -71,6 +132,12 @@ router.get('/browse', authenticateToken, requireAdmin, async (req, res) => {
     try {
         const targetPath = req.query.path || '/';
         const selectMode = req.query.mode || 'directories'; // 'directories', 'files', 'both'
+        // Borg-repo detection is opt-in: it probes one level deeper than the
+        // listing (expensive on FUSE/cloud mounts). Only callers that actually
+        // render the "Borg Repo" badge / select-vs-navigate behaviour (the
+        // repository picker) request it; sources, destinations, log/temp path
+        // pickers, etc. leave it off and get a plain, fast listing.
+        const detectBorg = req.query.detect_borg === 'true' || req.query.detect_borg === '1';
 
         if (isUnsafePathInput(targetPath)) {
             return res.status(400).json({
@@ -120,24 +187,15 @@ router.get('/browse', authenticateToken, requireAdmin, async (req, res) => {
 
             try {
                 entryStats = await fs.stat(fullPath);
-
-                // Check if directory is a Borg repository
-                if (entry.isDirectory()) {
-                    const configFile = path.join(fullPath, 'config');
-                    const dataDir = path.join(fullPath, 'data');
-                    
-                    if (await fs.pathExists(configFile) && await fs.pathExists(dataDir)) {
-                        try {
-                            const configContent = await fs.readFile(configFile, 'utf8');
-                            isBorgRepo = configContent.includes('[repository]');
-                        } catch (e) {
-                            // Could not read config file - not a borg repo or inaccessible
-                        }
-                    }
-                }
             } catch (e) {
                 // Skip inaccessible entries but mark them
                 isAccessible = false;
+            }
+
+            // Only probe for Borg-repo-ness when the caller asked for it, and
+            // only for directories we could stat. The probe is bounded + cached.
+            if (detectBorg && isAccessible && entry.isDirectory()) {
+                isBorgRepo = await detectBorgRepo(fullPath);
             }
 
             // Note: We always show directories for navigation
@@ -255,19 +313,10 @@ router.post('/validate-path', authenticateToken, requireAdmin, async (req, res) 
         const stats = await fs.stat(absolutePath);
         let isBorgRepo = false;
 
-        // Check if it's a Borg repository
+        // Check if it's a Borg repository (bounded + cached so a slow mount
+        // can't hang validation).
         if (stats.isDirectory()) {
-            const configFile = path.join(absolutePath, 'config');
-            const dataDir = path.join(absolutePath, 'data');
-
-            if (await fs.pathExists(configFile) && await fs.pathExists(dataDir)) {
-                try {
-                    const configContent = await fs.readFile(configFile, 'utf8');
-                    isBorgRepo = configContent.includes('[repository]');
-                } catch (e) {
-                    // Could not read config file
-                }
-            }
+            isBorgRepo = await detectBorgRepo(absolutePath);
         }
 
         res.json({

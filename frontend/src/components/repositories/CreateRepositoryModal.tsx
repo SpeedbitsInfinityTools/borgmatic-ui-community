@@ -2093,6 +2093,7 @@ const CreateRepositoryModal: React.FC<CreateRepositoryModalProps> = ({
         selectMode="directories"
         title="Select Repository Directory"
         selectButtonText="Select"
+        detectBorgRepos
       />
 
       {/* Mount Path Browser Modal */}

@@ -815,8 +815,17 @@ export const gitRestoreAPI = {
 
 // Filesystem API
 export const filesystemAPI = {
-  browse: (targetPath: string, mode: 'directories' | 'files' | 'both' = 'directories') =>
-    api.get('/filesystem/browse', { params: { path: targetPath, mode } }),
+  // `detectBorg` opts into per-entry Borg-repository detection. It's off by
+  // default because the probe is expensive on FUSE/cloud mounts; only the
+  // repository picker needs it.
+  browse: (
+    targetPath: string,
+    mode: 'directories' | 'files' | 'both' = 'directories',
+    detectBorg = false
+  ) =>
+    api.get('/filesystem/browse', {
+      params: { path: targetPath, mode, detect_borg: detectBorg ? 'true' : undefined },
+    }),
 
   validatePath: (targetPath: string) =>
     api.post('/filesystem/validate-path', { path: targetPath }),

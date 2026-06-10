@@ -41,6 +41,12 @@ interface FileExplorerModalProps {
   multiSelect?: boolean;
   title?: string;
   selectButtonText?: string;
+  /**
+   * Opt into Borg-repository detection (the "Borg Repo" badge and
+   * select-instead-of-navigate behaviour). Off by default because the probe is
+   * slow on FUSE/cloud mounts; only the repository picker needs it.
+   */
+  detectBorgRepos?: boolean;
 }
 
 const FileExplorerModal: React.FC<FileExplorerModalProps> = ({
@@ -52,6 +58,7 @@ const FileExplorerModal: React.FC<FileExplorerModalProps> = ({
   multiSelect = false,
   title = 'Browse Filesystem',
   selectButtonText = 'Select',
+  detectBorgRepos = false,
 }) => {
   const [currentPath, setCurrentPath] = useState(initialPath || '/');
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
@@ -77,8 +84,8 @@ const FileExplorerModal: React.FC<FileExplorerModalProps> = ({
     error,
     refetch,
   } = useQuery(
-    ['filesystem-browse', currentPath, selectMode],
-    () => filesystemAPI.browse(currentPath, selectMode),
+    ['filesystem-browse', currentPath, selectMode, detectBorgRepos],
+    () => filesystemAPI.browse(currentPath, selectMode, detectBorgRepos),
     {
       enabled: isOpen,
       retry: 1,

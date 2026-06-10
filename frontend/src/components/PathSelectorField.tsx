@@ -19,6 +19,8 @@ interface PathSelectorFieldProps {
   className?: string;
   inputClassName?: string;
   error?: string;
+  /** Opt into Borg-repo detection in the browser (only needed when picking an existing repository). */
+  detectBorgRepos?: boolean;
 }
 
 const PathSelectorField: React.FC<PathSelectorFieldProps> = ({
@@ -36,6 +38,7 @@ const PathSelectorField: React.FC<PathSelectorFieldProps> = ({
   className = '',
   inputClassName = '',
   error,
+  detectBorgRepos = false,
 }) => {
   const [showBrowser, setShowBrowser] = useState(false);
 
@@ -115,6 +118,7 @@ const PathSelectorField: React.FC<PathSelectorFieldProps> = ({
         initialPath={getInitialPath()}
         selectMode={selectMode}
         multiSelect={multiSelect}
+        detectBorgRepos={detectBorgRepos}
         title={
           selectMode === 'directories'
             ? 'Select Directory'
