@@ -23,6 +23,11 @@ const BORG_DETECT_CACHE_TTL_MS = 5 * 60 * 1000;
 const BORG_DETECT_TIMEOUT_MS = 1500;
 const borgDetectCache = new Map(); // absolutePath -> { result: boolean, ts: number }
 
+// Per-entry stat is also bounded: on a network mount (CIFS/NFS/Synology) a
+// single odd entry (e.g. a "#recycle" bin, or a symlink to an offline target)
+// can block stat for the full nginx timeout and 504 the whole listing.
+const ENTRY_STAT_TIMEOUT_MS = 3000;
+
 function withTimeout(promise, ms) {
     let timer;
     const timeout = new Promise((_resolve, reject) => {
@@ -186,9 +191,14 @@ router.get('/browse', authenticateToken, requireAdmin, async (req, res) => {
             let isAccessible = true;
 
             try {
-                entryStats = await fs.stat(fullPath);
+                // Use lstat (like `ls -l`), not stat: stat follows symlinks, so
+                // a link pointing at a slow/offline target would block here for
+                // the full nginx timeout. Bound it too, so one problematic entry
+                // can't stall the entire listing — we just show it without stat
+                // details instead of failing the whole browse.
+                entryStats = await withTimeout(fs.lstat(fullPath), ENTRY_STAT_TIMEOUT_MS);
             } catch (e) {
-                // Skip inaccessible entries but mark them
+                // Inaccessible or timed out — still list the entry, marked.
                 isAccessible = false;
             }
 
