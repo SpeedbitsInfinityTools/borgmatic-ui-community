@@ -21,7 +21,7 @@
 
 const { execSync } = require('child_process');
 const fs = require('fs');
-const { buildPasswordSshArgString } = require('../utils/ssh-password-auth');
+const { buildSshfsPasswordArgString } = require('../utils/ssh-password-auth');
 
 // TTLs are intentionally asymmetric:
 //   - Positive results are cached for a long time because once sshfs is
@@ -333,8 +333,10 @@ fi
 # Feed password via sshpass env var (never as CLI argument).
 # Pin to password-only auth so ssh doesn't offer /root/.ssh keys before the
 # password and trip the remote fail2ban (same trap fixed across browse/borg).
+# NOTE: sshfs -o values must be comma-free (FUSE splits on commas), hence the
+# sshfs-specific variant of the password-auth flags.
 export SSHPASS="$PASS_RAW"
-sshpass -e sshfs -p "$PORT" -o "$OPTS" ${buildPasswordSshArgString()} "$USER_NAME@$HOST:$REMOTE_PATH" "$MOUNT_POINT"
+sshpass -e sshfs -p "$PORT" -o "$OPTS" ${buildSshfsPasswordArgString()} "$USER_NAME@$HOST:$REMOTE_PATH" "$MOUNT_POINT"
 unset SSHPASS
 unset PASS_RAW
 if ! mountpoint -q "$MOUNT_POINT"; then

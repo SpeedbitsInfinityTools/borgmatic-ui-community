@@ -24,6 +24,25 @@ class BackupExecutor {
      * Borgmatic writes to --log-file itself, but if the process is killed
      * or crashes before flushing, the captured pipe data is all we have.
      */
+    /**
+     * Append a visually distinct job start/end banner to the borgmatic log
+     * file, so runs are easy to delimit when reading the log. Respects the
+     * same log settings as _appendToLogFile.
+     */
+    async _appendJobBanner(label) {
+        try {
+            const logSettings = await logManager.getSettings();
+            if (!logSettings.enabled || !logSettings.log_to_file) return;
+
+            const logPath = logManager.getBorgmaticLogPath();
+            const timestamp = new Date().toISOString().replace('T', ' ').replace(/\.\d+Z$/, '');
+            const bar = '='.repeat(70);
+            await fs.appendFile(logPath, `\n${bar}\n[${timestamp}] ${label}\n${bar}\n`);
+        } catch (err) {
+            console.error('Failed to append job banner to log file:', err.message);
+        }
+    }
+
     async _appendToLogFile(backupName, stderrData, stdoutData) {
         try {
             const logSettings = await logManager.getSettings();
@@ -86,6 +105,8 @@ class BackupExecutor {
             );
 
             const startTime = new Date().toISOString();
+
+            await this._appendJobBanner(`STARTING JOB: ${backup.name}`);
 
             // Mark as running
             this.runningBackups.set(backupId, {
@@ -579,6 +600,8 @@ class BackupExecutor {
                             } else {
                                 console.log(`✅ Backup completed: ${backup.name} (${Math.round(duration / 1000)}s)`);
                             }
+
+                            await this._appendJobBanner(`END OF JOB: ${backup.name} — ${status.toUpperCase()} (duration: ${Math.round(duration / 1000)}s)`);
                             
                             // Parse JSON output if available
                             let jsonOutput = null;
@@ -646,6 +669,8 @@ class BackupExecutor {
                             // Write captured output to log file as safety net
                             await this._appendToLogFile(backup.name, stderrData, stdoutData);
 
+                            await this._appendJobBanner(`END OF JOB: ${backup.name} — FAILED (exit code ${code}, duration: ${Math.round(duration / 1000)}s)`);
+
                             // Update metadata with error
                             await backupManager.updateBackupMetadata(backupId, {
                                 last_run: new Date().toISOString(),
@@ -697,6 +722,8 @@ class BackupExecutor {
 
                     await this._appendToLogFile(backup.name, error.message, stdoutData);
 
+                    await this._appendJobBanner(`END OF JOB: ${backup.name} — FAILED (process error: ${error.message})`);
+
                     await backupManager.updateBackupMetadata(backupId, {
                         last_run: new Date().toISOString(),
                         last_run_status: 'failed',
@@ -729,7 +756,13 @@ class BackupExecutor {
 
         } catch (error) {
             console.error(`❌ Failed to start backup: ${backupId}`, error.message);
-            
+
+            // Close the banner pair if the start banner was already written
+            // (backup is set as soon as the config was loaded).
+            if (backup) {
+                this._appendJobBanner(`END OF JOB: ${backup.name} — FAILED (${error.message})`).catch(() => {});
+            }
+
             // Broadcast failure event via SSE (so UI stops loading)
             eventManager.broadcastEvent('backup_failed', {
                 backup_id: backupId,
@@ -801,6 +834,7 @@ class BackupExecutor {
             `Backup manually stopped by user.\n${capturedOutput}`,
             ''
         ).catch(() => {});
+        this._appendJobBanner(`END OF JOB: ${info.backup.name} — STOPPED by user`).catch(() => {});
 
         this.runningBackups.delete(backupId);
 

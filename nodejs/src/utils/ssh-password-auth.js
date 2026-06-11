@@ -39,8 +39,22 @@ function buildPasswordSshArgString() {
     return `-o PreferredAuthentications=${PASSWORD_AUTH_PREFERRED_METHODS} -o PubkeyAuthentication=no`;
 }
 
+// sshfs-safe variant. sshfs runs every `-o` value through FUSE's option
+// parser, which splits on commas BEFORE forwarding unknown options to ssh.
+// So `-o PreferredAuthentications=keyboard-interactive,password` becomes the
+// ssh option `PreferredAuthentications=keyboard-interactive` plus a bogus
+// FUSE option `password`, and the mount dies with
+// `fuse: unknown option(s): -o password`. There is no escaping mechanism, so
+// for sshfs we must use a comma-free value: password-only. (Trade-off: a
+// server that only allows keyboard-interactive PAM auth won't work over
+// sshfs password mounts — but password is the overwhelmingly common case,
+// and key auth is unaffected.)
+function buildSshfsPasswordArgString() {
+    return '-o PreferredAuthentications=password -o PubkeyAuthentication=no';
+}
+
 // Back-compat alias (the args are identical for borg's BORG_RSH and any other
-// sshpass+ssh/sshfs invocation — same SSH password-auth policy).
+// sshpass+ssh invocation — same SSH password-auth policy).
 const buildBorgPasswordSshArgs = buildPasswordSshArgString;
 
 module.exports = {
@@ -48,5 +62,6 @@ module.exports = {
     PASSWORD_AUTH_SSH_FLAGS,
     PASSWORD_AUTH_SFTP_FLAGS,
     buildPasswordSshArgString,
+    buildSshfsPasswordArgString,
     buildBorgPasswordSshArgs,
 };
