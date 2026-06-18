@@ -384,6 +384,12 @@ export const templatesAPI = {
   activateLinuxServer: (data?: any) => api.post('/templates/linux-server/activate', data),
   deactivateLinuxServer: () => api.delete('/templates/linux-server'),
 
+  // User-saved backup templates (shown on the Templates page)
+  listUserTemplates: () => api.get('/templates/user'),
+  saveUserTemplate: (data: { name: string; description?: string; template: any }) =>
+    api.post('/templates/user', data),
+  deleteUserTemplate: (id: string) => api.delete(`/templates/user/${id}`),
+
   // Canary file (ransomware protection)
   getCanaryStatus: () => api.get('/templates/canary-status'),
   resetCanary: () => api.post('/templates/canary-reset'),

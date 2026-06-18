@@ -46,7 +46,7 @@ const navigation = [
   { name: 'Repositories', href: '/repositories', icon: Database, modes: ['standalone', 'client'] },
   { name: 'Schedules', href: '/schedules', icon: Clock, modes: ['standalone', 'client'] },
   { name: 'SSH Keys', href: '/ssh-keys', icon: Key, modes: ['standalone', 'client', 'director'] },
-  { name: 'Templates', href: '/templates', icon: LayoutIcon, modes: ['standalone', 'director'] },
+  { name: 'Templates', href: '/templates', icon: LayoutIcon, modes: ['standalone', 'client', 'director'] },
   { name: 'Clients', href: '/clients', icon: Users, modes: ['director'] },
   { name: 'Deployments', href: '/deployments', icon: Send, modes: ['director'] },
   { name: 'Logs', href: '/logs', icon: Activity, modes: ['standalone', 'client', 'director'] },

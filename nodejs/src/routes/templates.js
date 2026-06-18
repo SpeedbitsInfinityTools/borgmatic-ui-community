@@ -6,6 +6,7 @@ const templateManager = require('../services/template-manager');
 const identityManager = require('../services/identity-manager');
 const infinityToolsActivator = require('../services/templates/template-manager');
 const canaryFile = require('../services/canary-file');
+const userTemplateStore = require('../services/user-template-store');
 
 // Configure multer for file uploads (memory storage)
 const upload = multer({
@@ -519,6 +520,121 @@ router.delete('/linux-server', authenticateToken, requireAdmin, async (req, res)
             success: false,
             detail: error.message
         });
+    }
+});
+
+// ===================================================================
+// USER TEMPLATE ROUTES (saved/imported backup templates)
+// Available in ALL modes. Must be defined BEFORE the generic /:type routes.
+// ===================================================================
+
+/**
+ * GET /api/templates/user
+ * List all saved user templates.
+ */
+router.get('/user', authenticateToken, async (req, res) => {
+    try {
+        const templates = await userTemplateStore.list();
+        res.json({ success: true, data: { templates } });
+    } catch (error) {
+        console.error('Failed to list user templates:', error);
+        res.status(500).json({ success: false, detail: error.message });
+    }
+});
+
+/**
+ * POST /api/templates/user
+ * Save a user template.
+ * Body: { name, description?, template }
+ */
+router.post('/user', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        const { name, description, template } = req.body || {};
+
+        const MAX_NAME_LENGTH = 200;
+        const MAX_DESCRIPTION_LENGTH = 1000;
+        const MAX_TEMPLATE_BYTES = 256 * 1024; // 256 KB serialized
+        const MAX_TEMPLATES = 200;
+
+        if (!name || typeof name !== 'string' || !name.trim()) {
+            return res.status(400).json({
+                success: false,
+                detail: 'A template name is required.'
+            });
+        }
+        if (name.trim().length > MAX_NAME_LENGTH) {
+            return res.status(400).json({
+                success: false,
+                detail: `Template name is too long (max ${MAX_NAME_LENGTH} characters).`
+            });
+        }
+        if (description !== undefined && typeof description !== 'string') {
+            return res.status(400).json({
+                success: false,
+                detail: 'description must be a string.'
+            });
+        }
+        if (typeof description === 'string' && description.length > MAX_DESCRIPTION_LENGTH) {
+            return res.status(400).json({
+                success: false,
+                detail: `Template description is too long (max ${MAX_DESCRIPTION_LENGTH} characters).`
+            });
+        }
+        if (!template || typeof template !== 'object' || Array.isArray(template)) {
+            return res.status(400).json({
+                success: false,
+                detail: 'A template payload object is required.'
+            });
+        }
+
+        // Enforce a serialized size cap to prevent storage abuse.
+        let serializedSize;
+        try {
+            serializedSize = Buffer.byteLength(JSON.stringify(template), 'utf8');
+        } catch (e) {
+            return res.status(400).json({
+                success: false,
+                detail: 'Template payload is not serializable JSON.'
+            });
+        }
+        if (serializedSize > MAX_TEMPLATE_BYTES) {
+            return res.status(400).json({
+                success: false,
+                detail: `Template payload is too large (max ${Math.round(MAX_TEMPLATE_BYTES / 1024)} KB).`
+            });
+        }
+
+        // Cap the total number of stored templates to avoid unbounded growth.
+        const existing = await userTemplateStore.list();
+        if (existing.length >= MAX_TEMPLATES) {
+            return res.status(400).json({
+                success: false,
+                detail: `Maximum number of saved templates reached (${MAX_TEMPLATES}). Delete some before adding more.`
+            });
+        }
+
+        const saved = await userTemplateStore.save({ name, description, template });
+        res.status(201).json({ success: true, data: saved });
+    } catch (error) {
+        console.error('Failed to save user template:', error);
+        res.status(500).json({ success: false, detail: error.message });
+    }
+});
+
+/**
+ * DELETE /api/templates/user/:id
+ * Delete a saved user template.
+ */
+router.delete('/user/:id', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        const removed = await userTemplateStore.remove(req.params.id);
+        if (!removed) {
+            return res.status(404).json({ success: false, detail: 'Template not found.' });
+        }
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Failed to delete user template:', error);
+        res.status(500).json({ success: false, detail: error.message });
     }
 });
 

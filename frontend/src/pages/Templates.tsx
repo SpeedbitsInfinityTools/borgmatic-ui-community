@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from 'react-query'
 import { templatesAPI, repositoriesAPI, logsAPI } from '../services/api'
-import { FileText, Plus, Edit2, Trash2, Copy, Send, Clock, Database, Upload, Wrench, Shield, CheckCircle, AlertTriangle, FolderPlus, HardDrive } from 'lucide-react'
+import { FileText, Plus, Edit2, Trash2, Copy, Send, Clock, Database, Upload, Wrench, Shield, CheckCircle, AlertTriangle, FolderPlus, HardDrive, Download, ArrowRight } from 'lucide-react'
 import { toast } from 'react-hot-toast'
 import BackupWizard from '../components/BackupWizard'
 import DeploymentModal from '../components/DeploymentModal'
@@ -25,6 +26,9 @@ interface Template {
 
 export default function Templates() {
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
+  const userTemplateFileInputRef = useRef<HTMLInputElement>(null)
+  const [deletingUserTemplate, setDeletingUserTemplate] = useState<{ id: string; name: string } | null>(null)
   const { selectedClient } = useDirector()
   // Convert single selected client to array format for deployment
   const selectedClients = selectedClient ? [selectedClient.client_id] : []
@@ -154,7 +158,9 @@ export default function Templates() {
         setSelectedCategories([])
         linuxDefaultsAppliedRef.current = false
       }
-      setCustomRepoPath('/host/var/backups/borgmatic-repo')
+      // Use the backend template's repository path so the UI matches what the
+      // server would create (env-driven; works for Docker and native installs).
+      setCustomRepoPath(linuxServerTemplate?.repository?.path || '/backup-destination/borgmatic-repo')
     } else {
       setBackupSourcePath(suggestedBackupSource)
       setCustomRepoPath('/host/opt/speedbits-backup/borgmatic-repo')
@@ -234,6 +240,97 @@ export default function Templates() {
       toast.error(error.response?.data?.detail || 'Failed to import template')
     },
   })
+
+  // Saved user templates (exported from backup jobs or imported from a file)
+  const { data: userTemplatesData } = useQuery({
+    queryKey: ['user-templates'],
+    queryFn: () => templatesAPI.listUserTemplates(),
+  })
+  const userTemplates: Array<{ id: string; name: string; description?: string; created_at?: string; template: any }> =
+    userTemplatesData?.data?.data?.templates || []
+
+  const saveUserTemplateMutation = useMutation({
+    mutationFn: (payload: { name: string; description?: string; template: any }) =>
+      templatesAPI.saveUserTemplate(payload),
+    onSuccess: () => {
+      toast.success('Template imported')
+      queryClient.invalidateQueries({ queryKey: ['user-templates'] })
+    },
+    onError: (error: any) => {
+      toast.error(error.response?.data?.detail || 'Failed to import template')
+    },
+  })
+
+  const deleteUserTemplateMutation = useMutation({
+    mutationFn: (id: string) => templatesAPI.deleteUserTemplate(id),
+    onSuccess: () => {
+      toast.success('Template deleted')
+      queryClient.invalidateQueries({ queryKey: ['user-templates'] })
+      setDeletingUserTemplate(null)
+    },
+    onError: (error: any) => {
+      toast.error(error.response?.data?.detail || 'Failed to delete template')
+    },
+  })
+
+  const handleImportUserTemplateFile = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+    const MAX_TEMPLATE_SIZE = 1024 * 1024 // 1MB
+    if (file.size > MAX_TEMPLATE_SIZE) {
+      toast.error('Template file is too large (max 1MB).')
+      if (userTemplateFileInputRef.current) userTemplateFileInputRef.current.value = ''
+      return
+    }
+
+    const reader = new FileReader()
+    reader.onload = (e) => {
+      try {
+        const parsed = JSON.parse(e.target?.result as string)
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          toast.error('Invalid template file format.')
+          return
+        }
+        if (
+          !parsed.name ||
+          !Array.isArray(parsed.sources) || parsed.sources.length === 0 ||
+          !Array.isArray(parsed.repositories) || parsed.repositories.length === 0
+        ) {
+          toast.error('Invalid template: name, sources, and repositories are required.')
+          return
+        }
+        saveUserTemplateMutation.mutate({
+          name: parsed.name,
+          description: typeof parsed.description === 'string' ? parsed.description : '',
+          template: parsed,
+        })
+      } catch {
+        toast.error('Failed to parse template file. Please ensure it is valid JSON.')
+      }
+    }
+    reader.readAsText(file)
+
+    if (userTemplateFileInputRef.current) {
+      userTemplateFileInputRef.current.value = ''
+    }
+  }
+
+  const handleUseUserTemplate = (entry: { template: any }) => {
+    // Hand off to the Backups page, which opens the create wizard prefilled.
+    navigate('/backups', { state: { useTemplate: entry.template } })
+  }
+
+  const handleDownloadUserTemplate = (entry: { name: string; template: any }) => {
+    const blob = new Blob([JSON.stringify(entry.template, null, 2)], { type: 'application/json' })
+    const url = window.URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `${entry.name.replace(/[^a-z0-9]/gi, '_').toLowerCase()}_template.json`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    window.URL.revokeObjectURL(url)
+  }
 
   // Infinity Tools activation mutation
   const activateInfinityToolsMutation = useMutation({
@@ -870,6 +967,87 @@ export default function Templates() {
         </div>
       </div>
 
+      {/* My Saved Templates */}
+      <div className="card">
+        <div className="flex items-start justify-between gap-4 mb-4">
+          <div>
+            <h2 className="text-lg font-semibold text-gray-900">My Saved Templates</h2>
+            <p className="mt-1 text-sm text-gray-500">
+              Templates you exported from backup jobs or imported from a file. Use one to create a new backup job pre-filled with its settings.
+            </p>
+          </div>
+          <button
+            onClick={() => userTemplateFileInputRef.current?.click()}
+            className="btn-secondary flex items-center space-x-2 whitespace-nowrap flex-shrink-0"
+          >
+            <Upload className="w-4 h-4" />
+            <span>Import Template</span>
+          </button>
+          <input
+            ref={userTemplateFileInputRef}
+            type="file"
+            accept=".json"
+            onChange={handleImportUserTemplateFile}
+            className="hidden"
+          />
+        </div>
+
+        {userTemplates.length === 0 ? (
+          <div className="text-center py-8 border border-dashed border-gray-200 rounded-lg">
+            <FileText className="w-10 h-10 mx-auto text-gray-300 mb-2" />
+            <p className="text-sm text-gray-500">No saved templates yet.</p>
+            <p className="text-xs text-gray-400 mt-1">
+              On the Backup Jobs page, use "Export Template" → "Save to Templates page", or import a template file here.
+            </p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            {userTemplates.map((entry) => (
+              <div key={entry.id} className="border border-gray-200 rounded-lg p-4 flex flex-col">
+                <div className="flex items-start gap-3">
+                  <div className="p-2 bg-gray-100 rounded-lg flex-shrink-0">
+                    <FileText className="w-5 h-5 text-gray-600" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <h3 className="text-sm font-semibold text-gray-900 truncate" title={entry.name}>{entry.name}</h3>
+                    {entry.description && (
+                      <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{entry.description}</p>
+                    )}
+                    <p className="text-xs text-gray-400 mt-1">
+                      {Array.isArray(entry.template?.sources) ? entry.template.sources.length : 0} source(s)
+                      {entry.created_at ? ` · ${new Date(entry.created_at).toLocaleDateString()}` : ''}
+                    </p>
+                  </div>
+                </div>
+                <div className="mt-4 flex items-center gap-2">
+                  <button
+                    onClick={() => handleUseUserTemplate(entry)}
+                    className="btn-primary text-xs flex items-center gap-1 flex-1 justify-center"
+                  >
+                    Use Template
+                    <ArrowRight className="w-3 h-3" />
+                  </button>
+                  <button
+                    onClick={() => handleDownloadUserTemplate(entry)}
+                    className="p-2 text-gray-600 hover:text-gray-800 hover:bg-gray-100 rounded transition-colors"
+                    title="Download as file"
+                  >
+                    <Download className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={() => setDeletingUserTemplate({ id: entry.id, name: entry.name })}
+                    className="p-2 text-red-600 hover:text-red-800 hover:bg-red-50 rounded transition-colors"
+                    title="Delete template"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       {/* Templates List */}
       <div className="card">
         {templates.length === 0 ? (
@@ -996,6 +1174,39 @@ export default function Templates() {
             queryClient.invalidateQueries({ queryKey: ['deployments'] })
           }}
         />
+      )}
+
+      {/* Delete Saved Template Confirmation */}
+      {deletingUserTemplate && (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50 flex items-center justify-center p-4">
+          <div className="relative mx-auto p-6 border w-full max-w-md shadow-lg rounded-md bg-white">
+            <div className="flex items-start mb-4">
+              <Trash2 className="h-6 w-6 text-red-600 flex-shrink-0" />
+              <div className="ml-3">
+                <h3 className="text-lg font-medium text-gray-900">Delete Template</h3>
+                <p className="text-sm text-gray-500 mt-1">
+                  Really delete <span className="font-semibold text-gray-900">"{deletingUserTemplate.name}"</span>? This only removes the saved template, not any existing backup jobs.
+                </p>
+              </div>
+            </div>
+            <div className="mt-5 flex justify-end space-x-3">
+              <button
+                onClick={() => setDeletingUserTemplate(null)}
+                disabled={deleteUserTemplateMutation.isLoading}
+                className="px-4 py-2 bg-gray-200 text-gray-800 rounded hover:bg-gray-300 transition-colors disabled:opacity-60"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => deleteUserTemplateMutation.mutate(deletingUserTemplate.id)}
+                disabled={deleteUserTemplateMutation.isLoading}
+                className="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700 transition-colors disabled:opacity-60"
+              >
+                {deleteUserTemplateMutation.isLoading ? 'Deleting...' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Import Template Modal */}
@@ -1195,7 +1406,7 @@ export default function Templates() {
                             setCustomRepoPath(path)
                             resetRepoTest()
                           }}
-                          placeholder={isLinuxTemplate ? '/host/var/backups/borgmatic-repo' : '/host/opt/speedbits-backup/borgmatic-repo'}
+                          placeholder={isLinuxTemplate ? (linuxServerTemplate?.repository?.path || '/backup-destination/borgmatic-repo') : '/host/opt/speedbits-backup/borgmatic-repo'}
                           helperText="Path where the encrypted Borg repository will be created. Use the folder icon to browse and create directories."
                           selectMode="directories"
                           inputClassName="text-sm"

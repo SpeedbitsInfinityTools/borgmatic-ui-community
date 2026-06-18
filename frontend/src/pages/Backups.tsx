@@ -1,7 +1,7 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { calculateNextRun } from '../utils/cronNextRun';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
-import { Link } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   Plus,
   Edit2,
@@ -88,7 +88,12 @@ const Backups: React.FC = () => {
   const [viewMode, setViewMode] = useState<'cards' | 'list'>('cards');
   const [expandedBackups, setExpandedBackups] = useState<Set<string>>(new Set());
   const [duplicatingBackup, setDuplicatingBackup] = useState<BackupConfig | null>(null);
+  // Backup whose "Export as template" choice modal is open (download vs. save to page)
+  const [exportTarget, setExportTarget] = useState<BackupConfig | null>(null);
+  const [savingTemplate, setSavingTemplate] = useState(false);
   const templateFileInputRef = useRef<HTMLInputElement>(null);
+  const location = useLocation();
+  const navigate = useNavigate();
 
   // Toggle expanded state for sources
   const toggleSources = (backupId: string) => {
@@ -431,7 +436,7 @@ const Backups: React.FC = () => {
     setDeletingBackup(null);
   };
 
-  const handleExportAsTemplate = async (backup: BackupConfig) => {
+  const handleDownloadTemplate = async (backup: BackupConfig) => {
     try {
       const response = await backupsAPI.exportAsTemplate(backup.id);
 
@@ -446,11 +451,72 @@ const Backups: React.FC = () => {
       document.body.removeChild(link);
       window.URL.revokeObjectURL(url);
 
-      toast.success(`Template exported: ${backup.name}`);
+      toast.success(`Template downloaded: ${backup.name}`);
+      setExportTarget(null);
     } catch (error: any) {
       console.error('Failed to export template:', error);
       toast.error(error.response?.data?.error || 'Failed to export template');
     }
+  };
+
+  const handleSaveTemplateToPage = async (backup: BackupConfig) => {
+    setSavingTemplate(true);
+    try {
+      const response = await backupsAPI.exportAsTemplate(backup.id);
+      const template = response.data;
+      await templatesAPI.saveUserTemplate({
+        name: template?.name || `${backup.name} (Template)`,
+        description: template?.description || backup.description || '',
+        template,
+      });
+      queryClient.invalidateQueries({ queryKey: ['user-templates'] });
+      toast.success('Saved to Templates page');
+      setExportTarget(null);
+    } catch (error: any) {
+      console.error('Failed to save template:', error);
+      toast.error(error.response?.data?.detail || error.response?.data?.error || 'Failed to save template');
+    } finally {
+      setSavingTemplate(false);
+    }
+  };
+
+  // Normalize a raw template object and open the create wizard prefilled with it.
+  const loadTemplateIntoCreateModal = (parsed: any): boolean => {
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      toast.error('Invalid template format.');
+      return false;
+    }
+
+    const normalizedTemplate = {
+      name: typeof parsed.name === 'string' ? parsed.name : '',
+      description: typeof parsed.description === 'string' ? parsed.description : '',
+      sources: Array.isArray(parsed.sources) ? parsed.sources : [],
+      repositories: Array.isArray(parsed.repositories) ? parsed.repositories : [],
+      retention_profile_id: typeof parsed.retention_profile_id === 'string' ? parsed.retention_profile_id : 'profile-standard',
+      schedule_id: typeof parsed.schedule_id === 'string' ? parsed.schedule_id : null,
+      exclude_patterns: Array.isArray(parsed.exclude_patterns) ? parsed.exclude_patterns : [],
+      exclude_caches: parsed.exclude_caches !== false,
+      upload_rate_limit: typeof parsed.upload_rate_limit === 'number' ? parsed.upload_rate_limit : 0,
+      archive_name_format: typeof parsed.archive_name_format === 'string' ? parsed.archive_name_format : '{hostname}-{now}',
+      check_frequency: typeof parsed.check_frequency === 'string' ? parsed.check_frequency : '2 weeks',
+      hooks: (parsed.hooks && typeof parsed.hooks === 'object' && !Array.isArray(parsed.hooks)) ? parsed.hooks : {
+        before_backup: [],
+        after_backup: [],
+        on_error: [],
+      },
+      canary_file_enabled: parsed.canary_file_enabled === true,
+      canary_file_path: typeof parsed.canary_file_path === 'string' ? parsed.canary_file_path : '',
+      auto_break_lock: parsed.auto_break_lock === true,
+    };
+
+    if (!normalizedTemplate.name || normalizedTemplate.sources.length === 0 || normalizedTemplate.repositories.length === 0) {
+      toast.error('Invalid template: name, sources, and repositories are required.');
+      return false;
+    }
+
+    setSelectedTemplate(normalizedTemplate);
+    setShowCreateModal(true);
+    return true;
   };
 
   const handleImportTemplate = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -467,41 +533,9 @@ const Backups: React.FC = () => {
     reader.onload = (e) => {
       try {
         const parsed = JSON.parse(e.target?.result as string);
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-          toast.error('Invalid template file format.');
-          return;
+        if (loadTemplateIntoCreateModal(parsed)) {
+          toast.success(`Template loaded: ${parsed.name}`);
         }
-
-        const normalizedTemplate = {
-          name: typeof parsed.name === 'string' ? parsed.name : '',
-          description: typeof parsed.description === 'string' ? parsed.description : '',
-          sources: Array.isArray(parsed.sources) ? parsed.sources : [],
-          repositories: Array.isArray(parsed.repositories) ? parsed.repositories : [],
-          retention_profile_id: typeof parsed.retention_profile_id === 'string' ? parsed.retention_profile_id : 'profile-standard',
-          schedule_id: typeof parsed.schedule_id === 'string' ? parsed.schedule_id : null,
-          exclude_patterns: Array.isArray(parsed.exclude_patterns) ? parsed.exclude_patterns : [],
-          exclude_caches: parsed.exclude_caches !== false,
-          upload_rate_limit: typeof parsed.upload_rate_limit === 'number' ? parsed.upload_rate_limit : 0,
-          archive_name_format: typeof parsed.archive_name_format === 'string' ? parsed.archive_name_format : '{hostname}-{now}',
-          check_frequency: typeof parsed.check_frequency === 'string' ? parsed.check_frequency : '2 weeks',
-          hooks: (parsed.hooks && typeof parsed.hooks === 'object' && !Array.isArray(parsed.hooks)) ? parsed.hooks : {
-            before_backup: [],
-            after_backup: [],
-            on_error: [],
-          },
-          canary_file_enabled: parsed.canary_file_enabled === true,
-          canary_file_path: typeof parsed.canary_file_path === 'string' ? parsed.canary_file_path : '',
-          auto_break_lock: parsed.auto_break_lock === true,
-        };
-
-        if (!normalizedTemplate.name || normalizedTemplate.sources.length === 0 || normalizedTemplate.repositories.length === 0) {
-          toast.error('Invalid template: name, sources, and repositories are required.');
-          return;
-        }
-
-        setSelectedTemplate(normalizedTemplate);
-        setShowCreateModal(true);
-        toast.success(`Template loaded: ${normalizedTemplate.name}`);
       } catch {
         toast.error('Failed to parse template file. Please ensure it is valid JSON.');
       }
@@ -513,6 +547,18 @@ const Backups: React.FC = () => {
       templateFileInputRef.current.value = '';
     }
   };
+
+  // Open the create wizard prefilled when navigated here with a template to use
+  // (e.g. "Use Template" from the Templates page).
+  useEffect(() => {
+    const useTemplate = (location.state as any)?.useTemplate;
+    if (useTemplate) {
+      loadTemplateIntoCreateModal(useTemplate);
+      // Clear the navigation state so refresh/back doesn't re-open the wizard.
+      navigate(location.pathname, { replace: true, state: {} });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.state]);
 
   const handleDuplicate = (backup: BackupConfig) => {
     setDuplicatingBackup(backup);
@@ -992,7 +1038,7 @@ const Backups: React.FC = () => {
                         View Details
                       </button>
                       <button
-                        onClick={() => handleExportAsTemplate(backup)}
+                        onClick={() => setExportTarget(backup)}
                         className="text-xs px-3 py-1.5 bg-gray-100 hover:bg-gray-200 rounded transition-colors"
                       >
                         <Download className="w-3 h-3 inline mr-1" />
@@ -1499,7 +1545,7 @@ const Backups: React.FC = () => {
                         <Edit2 className="w-4 h-4" />
                       </button>
                       <button
-                        onClick={() => handleExportAsTemplate(backup)}
+                        onClick={() => setExportTarget(backup)}
                         className="p-2 text-green-600 hover:text-green-800 hover:bg-green-50 rounded transition-colors flex-shrink-0"
                         title="Export as template"
                       >
@@ -1691,6 +1737,59 @@ const Backups: React.FC = () => {
               >
                 <Copy className="w-4 h-4 mr-2" />
                 Duplicate
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {exportTarget && (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50 flex items-center justify-center p-4">
+          <div className="relative mx-auto p-6 border w-full max-w-md shadow-lg rounded-md bg-white">
+            <div className="flex items-start mb-4">
+              <div className="flex-shrink-0">
+                <Download className="h-6 w-6 text-blue-600" />
+              </div>
+              <div className="ml-3 flex-1">
+                <h3 className="text-lg font-medium text-gray-900">Export Template</h3>
+                <p className="text-sm text-gray-500 mt-1">
+                  Export <span className="font-semibold text-gray-900">"{exportTarget.name}"</span> as a reusable template.
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <button
+                onClick={() => handleSaveTemplateToPage(exportTarget)}
+                disabled={savingTemplate}
+                className="w-full flex items-start gap-3 p-3 border border-gray-200 rounded-lg hover:border-blue-400 hover:bg-blue-50 transition-colors text-left disabled:opacity-60"
+              >
+                <FileText className="w-5 h-5 text-blue-600 mt-0.5 flex-shrink-0" />
+                <span>
+                  <span className="block text-sm font-medium text-gray-900">Save to Templates page</span>
+                  <span className="block text-xs text-gray-500">Store it on this instance so you can reuse it from the Templates page.</span>
+                </span>
+              </button>
+              <button
+                onClick={() => handleDownloadTemplate(exportTarget)}
+                disabled={savingTemplate}
+                className="w-full flex items-start gap-3 p-3 border border-gray-200 rounded-lg hover:border-blue-400 hover:bg-blue-50 transition-colors text-left disabled:opacity-60"
+              >
+                <Download className="w-5 h-5 text-blue-600 mt-0.5 flex-shrink-0" />
+                <span>
+                  <span className="block text-sm font-medium text-gray-900">Download as file</span>
+                  <span className="block text-xs text-gray-500">Save a JSON file you can import elsewhere.</span>
+                </span>
+              </button>
+            </div>
+
+            <div className="mt-5 flex justify-end">
+              <button
+                onClick={() => setExportTarget(null)}
+                disabled={savingTemplate}
+                className="px-4 py-2 bg-gray-200 text-gray-800 rounded hover:bg-gray-300 transition-colors disabled:opacity-60"
+              >
+                Cancel
               </button>
             </div>
           </div>
