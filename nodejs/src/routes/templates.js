@@ -299,6 +299,229 @@ router.delete('/infinity-tools', authenticateToken, requireAdmin, async (req, re
     }
 });
 
+// ===================================================================
+// LINUX SERVER TEMPLATE ROUTES (must come BEFORE generic /:type routes!)
+// These work in ALL modes (standalone, client, director)
+// ===================================================================
+
+/**
+ * GET /api/templates/linux-server/status
+ * Check if the Linux Server template is activated and return its definition
+ * (including selectable categories) so the UI can render the activation modal.
+ */
+router.get('/linux-server/status', authenticateToken, async (req, res) => {
+    try {
+        const isActivated = infinityToolsActivator.isTemplateActivated('linux-server');
+        const template = infinityToolsActivator.getTemplate('linux-server');
+
+        res.json({
+            success: true,
+            data: {
+                activated: isActivated,
+                template: template
+            }
+        });
+    } catch (error) {
+        console.error('Failed to get Linux Server template status:', error);
+        res.status(500).json({
+            success: false,
+            detail: error.message
+        });
+    }
+});
+
+/**
+ * POST /api/templates/linux-server/activate
+ * Activate the built-in Linux Server backup template.
+ * Body: { categories?: string[], passphrase?, repository_option?, repository_path?, repository_id?, log_file_path?, borg_version? }
+ */
+router.post('/linux-server/activate', authenticateToken, requireAdmin, async (req, res) => {
+    console.log('📥 /linux-server/activate endpoint hit');
+    try {
+        const { passphrase, repository_option, repository_path, repository_id, log_file_path, borg_version, categories } = req.body;
+        const fs = require('fs-extra');
+        const path = require('path');
+
+        // Validate categories when provided
+        if (categories !== undefined && !Array.isArray(categories)) {
+            return res.status(400).json({
+                success: false,
+                detail: 'categories must be an array of category ids.',
+                error_code: 'INVALID_CATEGORIES'
+            });
+        }
+
+        // Allowlist category ids against the template definition to avoid acting
+        // on unknown/typo'd ids that would silently produce an empty backup.
+        if (Array.isArray(categories)) {
+            const linuxTemplate = infinityToolsActivator.getTemplate('linux-server');
+            const validIds = new Set((linuxTemplate?.categories || []).map((c) => c.id));
+            const unknown = categories.filter((id) => !validIds.has(id));
+            if (unknown.length > 0) {
+                return res.status(400).json({
+                    success: false,
+                    detail: `Unknown backup categor${unknown.length === 1 ? 'y' : 'ies'}: ${unknown.join(', ')}.`,
+                    error_code: 'INVALID_CATEGORIES'
+                });
+            }
+            if (categories.length === 0) {
+                return res.status(400).json({
+                    success: false,
+                    detail: 'Select at least one backup category to activate this template.',
+                    error_code: 'NO_CATEGORIES_SELECTED'
+                });
+            }
+        }
+
+        // Pre-validation for "create new repository" option
+        if (repository_option === 'create' && repository_path) {
+            if (await fs.pathExists(repository_path)) {
+                const configPath = path.join(repository_path, 'config');
+                const dataPath = path.join(repository_path, 'data');
+
+                if (await fs.pathExists(configPath) || await fs.pathExists(dataPath)) {
+                    return res.status(400).json({
+                        success: false,
+                        detail: 'A Borg repository already exists at this path. Please select "Use existing repository" or choose a different path.',
+                        error_code: 'REPO_EXISTS'
+                    });
+                }
+
+                try {
+                    const testFile = path.join(repository_path, '.borgmatic-test-write');
+                    await fs.writeFile(testFile, 'test');
+                    await fs.remove(testFile);
+                } catch (writeError) {
+                    return res.status(400).json({
+                        success: false,
+                        detail: `Permission denied: Cannot write to "${repository_path}". Please check directory permissions for your user or choose a different path.`,
+                        error_code: 'PERMISSION_DENIED'
+                    });
+                }
+            } else {
+                const parentDir = path.dirname(repository_path);
+                try {
+                    if (!await fs.pathExists(parentDir)) {
+                        const grandparentDir = path.dirname(parentDir);
+                        if (await fs.pathExists(grandparentDir)) {
+                            await fs.access(grandparentDir, fs.constants.W_OK);
+                        } else {
+                            throw new Error('Parent directory does not exist');
+                        }
+                    } else {
+                        await fs.access(parentDir, fs.constants.W_OK);
+                    }
+                } catch (writeError) {
+                    return res.status(400).json({
+                        success: false,
+                        detail: `Permission denied: Cannot create directory at "${repository_path}". Please check permissions for your user or choose a different path.`,
+                        error_code: 'PERMISSION_DENIED'
+                    });
+                }
+            }
+        }
+
+        // Pre-validation for log file path - test actual file write
+        if (log_file_path) {
+            try {
+                const normalizedPath = log_file_path.trim();
+                const logDir = path.dirname(normalizedPath);
+                await fs.ensureDir(logDir);
+                const testContent = `# Borgmatic UI log file test - ${new Date().toISOString()}\n`;
+                await fs.appendFile(normalizedPath, testContent);
+            } catch (writeError) {
+                return res.status(400).json({
+                    success: false,
+                    detail: `Cannot write to log file "${log_file_path}". Please check file permissions or choose a different path (e.g., in your home directory).`,
+                    error_code: 'LOG_PATH_PERMISSION_DENIED'
+                });
+            }
+        }
+
+        console.log('🚀 Starting Linux Server template activation with options:', {
+            repository_option,
+            repository_path,
+            repository_id,
+            log_file_path,
+            borg_version,
+            categories,
+            hasPassphrase: !!passphrase
+        });
+
+        const result = await infinityToolsActivator.activateLinuxServerTemplate({
+            categories: Array.isArray(categories) ? categories : undefined,
+            passphrase: passphrase || 'AUTO_GENERATE',
+            repository_option: repository_option || 'create',
+            repository_path: repository_path,
+            repository_id: repository_id,
+            log_file_path: log_file_path,
+            borg_version: borg_version || '1.x'
+        });
+
+        res.status(201).json({
+            success: true,
+            partial_success: result.partial_success || false,
+            message: result.message || 'Linux Server backup template activated successfully',
+            warnings: result.warnings || [],
+            data: result
+        });
+    } catch (error) {
+        console.error('Failed to activate Linux Server template:', error);
+
+        let status = 500;
+        let detail = error.message;
+        let errorCode = 'ACTIVATION_FAILED';
+
+        if (error.message.includes('already activated')) {
+            status = 409;
+            errorCode = 'ALREADY_ACTIVATED';
+        } else if (error.message.includes('at least one')) {
+            status = 400;
+            errorCode = 'NO_CATEGORIES';
+        } else if (error.message.includes('EACCES') || error.message.includes('permission denied')) {
+            status = 400;
+            detail = 'Permission denied: Cannot access the repository path. Please check permissions for your user.';
+            errorCode = 'PERMISSION_DENIED';
+        } else if (error.message.includes('ENOENT')) {
+            status = 400;
+            detail = 'Path not found: The specified directory does not exist.';
+            errorCode = 'PATH_NOT_FOUND';
+        } else if (error.message.includes('repository already exists') || error.message.includes('A repository already')) {
+            status = 400;
+            detail = 'A Borg repository already exists at this path. Please select "Use existing repository" or choose a different path.';
+            errorCode = 'REPO_EXISTS';
+        }
+
+        res.status(status).json({
+            success: false,
+            detail: detail,
+            error_code: errorCode
+        });
+    }
+});
+
+/**
+ * DELETE /api/templates/linux-server
+ * Deactivate the Linux Server template
+ */
+router.delete('/linux-server', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        const result = await infinityToolsActivator.deactivateLinuxServerTemplate();
+
+        res.json({
+            success: true,
+            message: 'Linux Server template deactivated',
+            data: result
+        });
+    } catch (error) {
+        console.error('Failed to deactivate Linux Server template:', error);
+        res.status(500).json({
+            success: false,
+            detail: error.message
+        });
+    }
+});
+
 /**
  * GET /api/templates/canary-status
  * Get canary file status (ransomware protection)

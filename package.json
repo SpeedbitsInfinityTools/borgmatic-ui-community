@@ -1,6 +1,6 @@
 {
   "name": "borgmatic-ui",
-  "version": "1.0.64",
+  "version": "1.0.65",
   "description": "Borgmatic Director UI - Comprehensive web-based user interface for managing Borgmatic backup operations",
   "private": true,
   "author": "Smart In Venture GmbH",

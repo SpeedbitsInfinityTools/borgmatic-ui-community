@@ -379,6 +379,11 @@ export const templatesAPI = {
   activateInfinityTools: (data?: any) => api.post('/templates/infinity-tools/activate', data),
   deactivateInfinityTools: () => api.delete('/templates/infinity-tools'),
 
+  // Linux Server template activation
+  getLinuxServerStatus: () => api.get('/templates/linux-server/status'),
+  activateLinuxServer: (data?: any) => api.post('/templates/linux-server/activate', data),
+  deactivateLinuxServer: () => api.delete('/templates/linux-server'),
+
   // Canary file (ransomware protection)
   getCanaryStatus: () => api.get('/templates/canary-status'),
   resetCanary: () => api.post('/templates/canary-reset'),

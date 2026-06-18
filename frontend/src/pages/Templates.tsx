@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from 'react-query'
 import { templatesAPI, repositoriesAPI, logsAPI } from '../services/api'
 import { FileText, Plus, Edit2, Trash2, Copy, Send, Clock, Database, Upload, Wrench, Shield, CheckCircle, AlertTriangle, FolderPlus, HardDrive } from 'lucide-react'
@@ -49,6 +49,14 @@ export default function Templates() {
   const [passphraseError, setPassphraseError] = useState<string | null>(null)
   // Backup source path (data path for Infinity Tools)
   const [backupSourcePath, setBackupSourcePath] = useState('/host/opt/speedbits')
+  // Which built-in template the activation modal is currently activating
+  const [activeTemplate, setActiveTemplate] = useState<'infinity-tools' | 'linux-server'>('infinity-tools')
+  // Selected backup categories (Linux Server template)
+  const [selectedCategories, setSelectedCategories] = useState<string[]>([])
+  const [showLinuxDetails, setShowLinuxDetails] = useState(false)
+  // Tracks whether category defaults have been applied for the open modal session,
+  // so we initialize them once even if the template status loads after the modal opens.
+  const linuxDefaultsAppliedRef = useRef(false)
 
   // Fetch log settings to get the suggested log path
   const { data: logSettingsData } = useQuery({
@@ -87,6 +95,18 @@ export default function Templates() {
   const discoveredPaths = infinityToolsStatus?.discovered_paths
   const suggestedBackupSource = discoveredPaths?.suggested_backup_source || '/host/opt/speedbits'
 
+  // Fetch Linux Server template status (+ definition with categories)
+  const { data: linuxServerData, refetch: refetchLinuxServer } = useQuery({
+    queryKey: ['linux-server-template'],
+    queryFn: () => templatesAPI.getLinuxServerStatus(),
+  })
+  const linuxServerStatus = linuxServerData?.data?.data
+  const isLinuxServerActivated = linuxServerStatus?.activated || false
+  const linuxServerTemplate = linuxServerStatus?.template
+  const linuxCategories: Array<{ id: string; label: string; description: string; default: boolean }> =
+    linuxServerTemplate?.categories || []
+  const isLinuxTemplate = activeTemplate === 'linux-server'
+
   // Fetch existing repositories for selection
   const { data: repositoriesData } = useQuery({
     queryKey: ['repositories'],
@@ -113,14 +133,53 @@ export default function Templates() {
     setShowPassphrase(false)
     setPassphraseError(null)
     resetRepoTest()
+    linuxDefaultsAppliedRef.current = false
     // Reset backup source path to suggested value
     setBackupSourcePath(suggestedBackupSource)
   }
 
-  const openActivationModal = () => {
-    // Initialize backup source path with discovered/suggested value
-    setBackupSourcePath(suggestedBackupSource)
+  const openActivationModalFor = (templateId: 'infinity-tools' | 'linux-server') => {
+    setActiveTemplate(templateId)
+    resetRepoTest()
+    if (templateId === 'linux-server') {
+      // Apply category defaults now if the template is already loaded; otherwise
+      // the effect below initializes them once the status query resolves.
+      const cats = linuxCategories.length > 0
+        ? linuxCategories
+        : (linuxServerTemplate?.categories || [])
+      if (cats.length > 0) {
+        setSelectedCategories(cats.filter((c: any) => c.default).map((c: any) => c.id))
+        linuxDefaultsAppliedRef.current = true
+      } else {
+        setSelectedCategories([])
+        linuxDefaultsAppliedRef.current = false
+      }
+      setCustomRepoPath('/host/var/backups/borgmatic-repo')
+    } else {
+      setBackupSourcePath(suggestedBackupSource)
+      setCustomRepoPath('/host/opt/speedbits-backup/borgmatic-repo')
+    }
     setShowActivationModal(true)
+  }
+
+  // Initialize Linux category defaults once the template status resolves, in case
+  // the activation modal was opened before the query finished loading.
+  useEffect(() => {
+    if (
+      showActivationModal &&
+      activeTemplate === 'linux-server' &&
+      !linuxDefaultsAppliedRef.current &&
+      linuxCategories.length > 0
+    ) {
+      setSelectedCategories(linuxCategories.filter((c) => c.default).map((c) => c.id))
+      linuxDefaultsAppliedRef.current = true
+    }
+  }, [showActivationModal, activeTemplate, linuxCategories.length])
+
+  const toggleCategory = (id: string) => {
+    setSelectedCategories((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    )
   }
 
   // Delete mutation
@@ -232,6 +291,70 @@ export default function Templates() {
     },
   })
 
+  // Linux Server activation mutation
+  const activateLinuxServerMutation = useMutation({
+    mutationFn: (options: { categories: string[], repoOption: 'create' | 'select', repoPath?: string, repoId?: string, logPath?: string, borgVersion?: string, passphrase?: string }) =>
+      templatesAPI.activateLinuxServer({
+        categories: options.categories,
+        passphrase: options.passphrase || 'AUTO_GENERATE',
+        repository_option: options.repoOption,
+        repository_path: options.repoPath,
+        repository_id: options.repoId,
+        log_file_path: options.logPath,
+        borg_version: options.borgVersion,
+      }),
+    onSuccess: (response) => {
+      const warnings = response.data?.warnings || []
+      const partialSuccess = response.data?.partial_success
+
+      if (partialSuccess && warnings.length > 0) {
+        toast.success('Linux Server backup partially activated!', { duration: 6000 })
+        warnings.forEach((warning: string) => {
+          toast.error(`⚠️ ${warning}`, { duration: 8000 })
+        })
+      } else {
+        toast.success('Linux Server backup activated! Repository passphrase saved.')
+      }
+
+      refetchLinuxServer()
+      queryClient.invalidateQueries({ queryKey: ['templates'] })
+      queryClient.invalidateQueries({ queryKey: ['backups'] })
+      queryClient.invalidateQueries({ queryKey: ['repositories'] })
+      setShowLinuxDetails(false)
+      closeActivationModal()
+    },
+    onError: (error: any) => {
+      const errorData = error.response?.data
+      const errorCode = errorData?.error_code
+      const detail = errorData?.detail || 'Failed to activate Linux Server template'
+
+      if (errorCode === 'ALREADY_ACTIVATED') {
+        toast.error('Template is already activated. Refresh the page to see current status.')
+      } else {
+        toast.error(detail, { duration: 6000 })
+      }
+    },
+  })
+
+  // Linux Server deactivation mutation
+  const deactivateLinuxServerMutation = useMutation({
+    mutationFn: () => templatesAPI.deactivateLinuxServer(),
+    onSuccess: () => {
+      toast.success('Linux Server template deactivated')
+      refetchLinuxServer()
+      queryClient.invalidateQueries({ queryKey: ['templates'] })
+      queryClient.invalidateQueries({ queryKey: ['backups'] })
+      setShowLinuxDetails(false)
+    },
+    onError: (error: any) => {
+      toast.error(error.response?.data?.detail || 'Failed to deactivate template')
+    },
+  })
+
+  const isActivating = isLinuxTemplate
+    ? activateLinuxServerMutation.isLoading
+    : activateInfinityToolsMutation.isLoading
+
   // Normalize log file path - ensure it ends with .log
   const normalizeLogPath = (path: string): string => {
     if (!path || path.trim() === '') return '';
@@ -266,7 +389,24 @@ export default function Templates() {
     }
     
     const normalizedLogPath = normalizeLogPath(logFilePath);
-    
+
+    if (isLinuxTemplate) {
+      if (selectedCategories.length === 0) {
+        toast.error('Select at least one backup category before activating.')
+        return
+      }
+      activateLinuxServerMutation.mutate({
+        categories: selectedCategories,
+        repoOption,
+        repoPath: repoOption === 'create' ? customRepoPath : undefined,
+        repoId: repoOption === 'select' ? selectedRepoId : undefined,
+        logPath: normalizedLogPath,
+        borgVersion: repoOption === 'create' ? borgVersion : undefined,
+        passphrase: repoOption === 'create' ? passphrase : undefined,
+      })
+      return
+    }
+
     activateInfinityToolsMutation.mutate({
       repoOption,
       repoPath: repoOption === 'create' ? customRepoPath : undefined,
@@ -547,7 +687,7 @@ export default function Templates() {
               {!isInfinityToolsActivated ? (
                 <>
                   <button
-                    onClick={openActivationModal}
+                    onClick={() => openActivationModalFor('infinity-tools')}
                     disabled={activateInfinityToolsMutation.isLoading}
                     className="btn-primary text-sm"
                   >
@@ -625,6 +765,105 @@ export default function Templates() {
             {showInfinityToolsDetails && !infinityToolsTemplate && (
               <div className="mt-4 p-4 bg-yellow-50 rounded-lg border border-yellow-200">
                 <p className="text-yellow-700">Template details are loading or not available. Please try refreshing the page.</p>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Linux Server Quick Setup Card */}
+      <div className="card bg-gradient-to-br from-emerald-50 to-teal-50 border-2 border-emerald-200">
+        <div className="flex items-start gap-4">
+          <div className="p-3 bg-emerald-100 rounded-lg">
+            <HardDrive className="w-8 h-8 text-emerald-600" />
+          </div>
+          <div className="flex-1">
+            <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+              Linux Server Backup Template
+              {isLinuxServerActivated && (
+                <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                  <CheckCircle className="w-3 h-3 mr-1" />
+                  Activated
+                </span>
+              )}
+            </h3>
+            <p className="mt-1 text-sm text-gray-600">
+              Category-based backup for a generic Linux server. Tick what to back up (home, /etc, Docker volumes, web sites, databases, ...) and it creates editable backup jobs you can fine-tune afterwards.
+            </p>
+
+            <div className="mt-3 flex flex-wrap gap-2 text-xs text-gray-600">
+              <span className="inline-flex items-center px-2 py-1 bg-white rounded">
+                <FileText className="w-3 h-3 mr-1" />
+                /home, /etc, /var/www, ...
+              </span>
+              <span className="inline-flex items-center px-2 py-1 bg-white rounded">
+                <Database className="w-3 h-3 mr-1" />
+                Auto-discover databases
+              </span>
+              <span className="inline-flex items-center px-2 py-1 bg-white rounded">
+                <Shield className="w-3 h-3 mr-1" />
+                Disaster-recovery state
+              </span>
+            </div>
+
+            <div className="mt-4 flex items-center gap-3">
+              {!isLinuxServerActivated ? (
+                <>
+                  <button
+                    onClick={() => openActivationModalFor('linux-server')}
+                    disabled={activateLinuxServerMutation.isLoading}
+                    className="btn-primary text-sm"
+                  >
+                    {activateLinuxServerMutation.isLoading ? 'Activating...' : 'Activate Template'}
+                  </button>
+                  <button
+                    onClick={() => setShowLinuxDetails(!showLinuxDetails)}
+                    className="btn-secondary text-sm"
+                  >
+                    {showLinuxDetails ? 'Hide Details' : 'Show Details'}
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    onClick={() => setShowLinuxDetails(!showLinuxDetails)}
+                    className="btn-secondary text-sm"
+                  >
+                    {showLinuxDetails ? 'Hide Details' : 'View Configuration'}
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (confirm('Are you sure you want to deactivate the Linux Server template? This will remove all associated backup jobs and schedules.')) {
+                        deactivateLinuxServerMutation.mutate()
+                      }
+                    }}
+                    disabled={deactivateLinuxServerMutation.isLoading}
+                    className="btn-danger text-sm"
+                  >
+                    {deactivateLinuxServerMutation.isLoading ? 'Deactivating...' : 'Deactivate'}
+                  </button>
+                </>
+              )}
+            </div>
+
+            {showLinuxDetails && linuxCategories.length > 0 && (
+              <div className="mt-4 p-4 bg-white rounded-lg border border-gray-200">
+                <h4 className="font-medium text-gray-900 mb-3">Available Backup Categories</h4>
+                <ul className="space-y-2 text-sm">
+                  {linuxCategories.map((cat) => (
+                    <li key={cat.id} className="flex items-start gap-2">
+                      <span className={`mt-1 inline-block w-2 h-2 rounded-full flex-shrink-0 ${cat.default ? 'bg-emerald-500' : 'bg-gray-300'}`} />
+                      <span>
+                        <span className="font-medium text-gray-800">{cat.label}</span>
+                        {cat.default && <span className="ml-2 text-xs text-emerald-600">(on by default)</span>}
+                        <span className="block text-gray-500">{cat.description}</span>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+                <p className="mt-3 text-xs text-gray-500">
+                  Activation creates editable backup jobs. In Docker, host paths are read from the <code className="bg-gray-100 px-1 rounded">/host</code> mount; disaster-recovery and firewall capture is best-effort.
+                </p>
               </div>
             )}
           </div>
@@ -831,13 +1070,17 @@ export default function Templates() {
         <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50 flex items-start justify-center py-8">
           <div className="relative bg-white rounded-lg shadow-xl max-w-lg w-full mx-4 max-h-[calc(100vh-4rem)] flex flex-col">
             {/* Header - fixed */}
-            <div className="px-6 py-4 border-b border-gray-200 bg-gradient-to-r from-blue-50 to-indigo-50 flex-shrink-0">
+            <div className={`px-6 py-4 border-b border-gray-200 flex-shrink-0 ${isLinuxTemplate ? 'bg-gradient-to-r from-emerald-50 to-teal-50' : 'bg-gradient-to-r from-blue-50 to-indigo-50'}`}>
               <div className="flex items-center gap-3">
-                <Wrench className="w-6 h-6 text-blue-600" />
+                {isLinuxTemplate
+                  ? <HardDrive className="w-6 h-6 text-emerald-600" />
+                  : <Wrench className="w-6 h-6 text-blue-600" />}
                 <div>
-                  <h3 className="text-lg font-medium text-gray-900">Activate Infinity Tools Backup</h3>
+                  <h3 className="text-lg font-medium text-gray-900">
+                    {isLinuxTemplate ? 'Activate Linux Server Backup' : 'Activate Infinity Tools Backup'}
+                  </h3>
                   <p className="mt-1 text-sm text-gray-500">
-                    Choose how to store your backups
+                    {isLinuxTemplate ? 'Pick what to back up and where to store it' : 'Choose how to store your backups'}
                   </p>
                 </div>
               </div>
@@ -845,28 +1088,61 @@ export default function Templates() {
 
             {/* Body - scrollable */}
             <div className="px-6 py-4 space-y-4 overflow-y-auto flex-1">
-              {/* Backup Source Path (Data Path) */}
-              <div className="space-y-2">
-                <PathSelectorField
-                  label="Infinity Tools Data Path"
-                  value={backupSourcePath}
-                  onChange={setBackupSourcePath}
-                  placeholder="/host/opt/speedbits"
-                  helperText="Path to your Infinity Tools data directory. This is where your applications and configurations are stored."
-                  selectMode="directories"
-                  inputClassName="text-sm"
-                />
-                {discoveredPaths?.discovered && (
-                  <p className="text-xs text-green-600">
-                    ✅ Auto-discovered from <code className="bg-green-50 px-1 rounded">/etc/infinitytools.conf</code>
+              {isLinuxTemplate ? (
+                /* Backup Categories (Linux Server) */
+                <div className="space-y-2">
+                  <label className="block text-sm font-medium text-gray-700">What to back up</label>
+                  <p className="text-xs text-gray-500">
+                    Ticked categories become the sources of editable backup jobs. You can refine each job afterwards in the Backups page.
                   </p>
-                )}
-                {discoveredPaths && !discoveredPaths.discovered && (
-                  <p className="text-xs text-amber-600">
-                    ⚠️ Using default path (no infinitytools.conf found)
+                  <div className="border border-gray-200 rounded-lg divide-y divide-gray-100">
+                    {linuxCategories.length === 0 ? (
+                      <p className="p-3 text-sm text-amber-600">Loading categories...</p>
+                    ) : (
+                      linuxCategories.map((cat) => (
+                        <label key={cat.id} className="flex items-start gap-3 p-3 cursor-pointer hover:bg-gray-50">
+                          <input
+                            type="checkbox"
+                            checked={selectedCategories.includes(cat.id)}
+                            onChange={() => toggleCategory(cat.id)}
+                            className="mt-1 h-4 w-4 text-emerald-600 rounded"
+                          />
+                          <span>
+                            <span className="font-medium text-sm text-gray-900">{cat.label}</span>
+                            <span className="block text-xs text-gray-500">{cat.description}</span>
+                          </span>
+                        </label>
+                      ))
+                    )}
+                  </div>
+                  <p className="text-xs text-gray-500">
+                    In Docker, host paths are read from the <code className="bg-gray-100 px-1 rounded">/host</code> mount. Disaster-recovery and firewall capture is best-effort and depends on host tooling/permissions.
                   </p>
-                )}
-              </div>
+                </div>
+              ) : (
+                /* Backup Source Path (Data Path) - Infinity Tools */
+                <div className="space-y-2">
+                  <PathSelectorField
+                    label="Infinity Tools Data Path"
+                    value={backupSourcePath}
+                    onChange={setBackupSourcePath}
+                    placeholder="/host/opt/speedbits"
+                    helperText="Path to your Infinity Tools data directory. This is where your applications and configurations are stored."
+                    selectMode="directories"
+                    inputClassName="text-sm"
+                  />
+                  {discoveredPaths?.discovered && (
+                    <p className="text-xs text-green-600">
+                      ✅ Auto-discovered from <code className="bg-green-50 px-1 rounded">/etc/infinitytools.conf</code>
+                    </p>
+                  )}
+                  {discoveredPaths && !discoveredPaths.discovered && (
+                    <p className="text-xs text-amber-600">
+                      ⚠️ Using default path (no infinitytools.conf found)
+                    </p>
+                  )}
+                </div>
+              )}
 
               {/* Repository Option Selection */}
               <div className="space-y-3">
@@ -919,7 +1195,7 @@ export default function Templates() {
                             setCustomRepoPath(path)
                             resetRepoTest()
                           }}
-                          placeholder="/host/opt/speedbits-backup/borgmatic-repo"
+                          placeholder={isLinuxTemplate ? '/host/var/backups/borgmatic-repo' : '/host/opt/speedbits-backup/borgmatic-repo'}
                           helperText="Path where the encrypted Borg repository will be created. Use the folder icon to browse and create directories."
                           selectMode="directories"
                           inputClassName="text-sm"
@@ -1121,9 +1397,20 @@ export default function Templates() {
               <div className="p-3 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-600">
                 <strong>What happens when you activate:</strong>
                 <ul className="list-disc list-inside mt-1 space-y-1">
-                  <li>Creates backup jobs for files and databases</li>
-                  <li>Sets up daily backup schedules (files at 2 AM, databases at 3 AM)</li>
-                  <li>{repoOption === 'create' ? 'Uses your passphrase for repository encryption' : 'Uses the existing repository encryption'}</li>
+                  {isLinuxTemplate ? (
+                    <>
+                      <li>Creates an editable files backup job from your selected categories</li>
+                      {selectedCategories.includes('databases') && <li>Auto-discovers databases and creates a separate database backup job</li>}
+                      <li>Sets up daily backup schedules (files at 2 AM, databases at 3 AM)</li>
+                      <li>{repoOption === 'create' ? 'Uses your passphrase for repository encryption' : 'Uses the existing repository encryption'}</li>
+                    </>
+                  ) : (
+                    <>
+                      <li>Creates backup jobs for files and databases</li>
+                      <li>Sets up daily backup schedules (files at 2 AM, databases at 3 AM)</li>
+                      <li>{repoOption === 'create' ? 'Uses your passphrase for repository encryption' : 'Uses the existing repository encryption'}</li>
+                    </>
+                  )}
                 </ul>
               </div>
             </div>
@@ -1133,16 +1420,16 @@ export default function Templates() {
               <button
                 onClick={closeActivationModal}
                 className="btn-secondary"
-                disabled={activateInfinityToolsMutation.isLoading}
+                disabled={isActivating}
               >
                 Cancel
               </button>
               <button
                 onClick={handleActivate}
                 className="btn-primary flex items-center gap-2"
-                disabled={activateInfinityToolsMutation.isLoading || (repoOption === 'select' && !selectedRepoId)}
+                disabled={isActivating || (repoOption === 'select' && !selectedRepoId) || (isLinuxTemplate && selectedCategories.length === 0)}
               >
-                {activateInfinityToolsMutation.isLoading ? (
+                {isActivating ? (
                   <>
                     <div className="animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent" />
                     Activating...
@@ -1157,7 +1444,7 @@ export default function Templates() {
             </div>
 
             {/* Loading overlay when activating */}
-            {activateInfinityToolsMutation.isLoading && (
+            {isActivating && (
               <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
                 <div className="flex items-center gap-3">
                   <div className="animate-spin rounded-full h-5 w-5 border-2 border-blue-600 border-t-transparent" />
