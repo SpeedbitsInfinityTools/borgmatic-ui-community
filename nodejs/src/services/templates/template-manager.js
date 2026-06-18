@@ -600,7 +600,20 @@ class TemplateManager {
         if (options.repository_option === 'select' && options.repository_id) {
             const configParser = require('../config-parser');
             const allRepos = await configParser.getAllRepositoriesWithUsage();
-            const selectedRepo = allRepos.find(r => r.id === options.repository_id);
+            let selectedRepo = allRepos.find(r => r.id === options.repository_id);
+
+            // Fallback: repositories parsed from existing configs may not carry a
+            // stable id (the UI assigns synthetic "repo-legacy-N" ids based on list
+            // order, which won't match here). Match on the path when it was sent.
+            if (!selectedRepo && options.repository_path) {
+                const normalize = (p) => {
+                    if (!p) return p;
+                    if (p.startsWith('ssh://') || p.startsWith('s3:') || p.startsWith('rclone:')) return p;
+                    return path.normalize(p);
+                };
+                const target = normalize(options.repository_path);
+                selectedRepo = allRepos.find(r => normalize(r.path) === target);
+            }
 
             if (!selectedRepo) {
                 throw new Error(`Repository not found: ${options.repository_id}`);

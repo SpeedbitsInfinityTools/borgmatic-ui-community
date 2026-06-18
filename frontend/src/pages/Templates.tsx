@@ -495,7 +495,9 @@ export default function Templates() {
       activateLinuxServerMutation.mutate({
         categories: selectedCategories,
         repoOption,
-        repoPath: repoOption === 'create' ? customRepoPath : undefined,
+        // For "select", send the selected repo's path so the backend can match it
+        // even when the repo has no stable id (synthetic "repo-legacy-N" ids).
+        repoPath: repoOption === 'create' ? customRepoPath : selectedRepo?.path,
         repoId: repoOption === 'select' ? selectedRepoId : undefined,
         logPath: normalizedLogPath,
         borgVersion: repoOption === 'create' ? borgVersion : undefined,
@@ -506,7 +508,8 @@ export default function Templates() {
 
     activateInfinityToolsMutation.mutate({
       repoOption,
-      repoPath: repoOption === 'create' ? customRepoPath : undefined,
+      // For "select", send the selected repo's path as a fallback match key.
+      repoPath: repoOption === 'create' ? customRepoPath : selectedRepo?.path,
       repoId: repoOption === 'select' ? selectedRepoId : undefined,
       logPath: normalizedLogPath,
       borgVersion: repoOption === 'create' ? borgVersion : undefined,
