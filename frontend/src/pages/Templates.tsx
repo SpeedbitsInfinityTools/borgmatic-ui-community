@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from 'react-query'
-import { templatesAPI, repositoriesAPI, logsAPI } from '../services/api'
-import { FileText, Plus, Edit2, Trash2, Copy, Send, Clock, Database, Upload, Wrench, Shield, CheckCircle, AlertTriangle, FolderPlus, HardDrive, Download, ArrowRight } from 'lucide-react'
+import { templatesAPI, repositoriesAPI, logsAPI, sshKeysAPI, systemConfigAPI } from '../services/api'
+import { FileText, Plus, Edit2, Trash2, Copy, Send, Clock, Database, Upload, Wrench, Shield, CheckCircle, AlertTriangle, FolderPlus, HardDrive, Download, ArrowRight, Server, Monitor, KeyRound, Lock, Eye, EyeOff } from 'lucide-react'
 import { toast } from 'react-hot-toast'
 import BackupWizard from '../components/BackupWizard'
 import DeploymentModal from '../components/DeploymentModal'
@@ -40,7 +40,8 @@ export default function Templates() {
   const [importFile, setImportFile] = useState<File | null>(null)
   const [showInfinityToolsDetails, setShowInfinityToolsDetails] = useState(false)
   const [showActivationModal, setShowActivationModal] = useState(false)
-  const [repoOption, setRepoOption] = useState<'create' | 'select'>('create')
+  // Default to "select" since reusing an existing repository is the common case.
+  const [repoOption, setRepoOption] = useState<'create' | 'select'>('select')
   const [selectedRepoId, setSelectedRepoId] = useState<string>('')
   const [customRepoPath, setCustomRepoPath] = useState('/host/opt/speedbits-backup/borgmatic-repo')
   const [repoTestResult, setRepoTestResult] = useState<{ status: 'idle' | 'testing' | 'success' | 'error'; message?: string; key?: string }>({ status: 'idle' })
@@ -61,6 +62,17 @@ export default function Templates() {
   // Tracks whether category defaults have been applied for the open modal session,
   // so we initialize them once even if the template status loads after the modal opens.
   const linuxDefaultsAppliedRef = useRef(false)
+
+  // Linux Server template: backup target (local server vs. remote over SSH/SFTP)
+  const [linuxTarget, setLinuxTarget] = useState<'local' | 'remote'>('local')
+  const [sshHost, setSshHost] = useState('')
+  const [sshPort, setSshPort] = useState<number>(22)
+  const [sshUsername, setSshUsername] = useState('')
+  const [sshAuthMethod, setSshAuthMethod] = useState<'key' | 'password'>('key')
+  const [sshKeyId, setSshKeyId] = useState<string>('')
+  const [sshPassword, setSshPassword] = useState('')
+  const [showSshPassword, setShowSshPassword] = useState(false)
+  const [sshTestResult, setSshTestResult] = useState<{ status: 'idle' | 'testing' | 'success' | 'error'; message?: string }>({ status: 'idle' })
 
   // Fetch log settings to get the suggested log path
   const { data: logSettingsData } = useQuery({
@@ -110,6 +122,11 @@ export default function Templates() {
   const linuxCategories: Array<{ id: string; label: string; description: string; default: boolean }> =
     linuxServerTemplate?.categories || []
   const isLinuxTemplate = activeTemplate === 'linux-server'
+  // Database auto-discovery and disaster-recovery capture only work for the local
+  // server, so they are hidden when backing up a remote target over SSH/SFTP.
+  const visibleLinuxCategories = linuxTarget === 'remote'
+    ? linuxCategories.filter((c) => c.id !== 'databases' && c.id !== 'dr_extras')
+    : linuxCategories
 
   // Fetch existing repositories for selection
   const { data: repositoriesData } = useQuery({
@@ -117,6 +134,27 @@ export default function Templates() {
     queryFn: () => repositoriesAPI.getRepositoriesFast(),
   })
   const existingRepositories = repositoriesData?.data?.data?.repositories || []
+
+  // SSH keys for the remote (SSH/SFTP) Linux backup target. Encrypted keys are
+  // not usable for sshfs mounts, so they are filtered out of the picker.
+  const { data: sshKeysData } = useQuery({
+    queryKey: ['ssh-keys'],
+    queryFn: () => sshKeysAPI.getSSHKeys(),
+    enabled: showActivationModal && isLinuxTemplate,
+  })
+  const sshKeys: Array<{ id: string | number; name: string; key_type: string; is_encrypted?: boolean }> =
+    sshKeysData?.data?.ssh_keys || sshKeysData?.data?.data?.ssh_keys || []
+  const selectableSshKeys = sshKeys.filter((k) => !k.is_encrypted)
+
+  // sshfs availability — remote sources are sshfs-mounted at backup time, which
+  // needs FUSE enabled on the borgmatic-ui container. Surface a warning if not.
+  const { data: sshfsStatusData } = useQuery({
+    queryKey: ['sshfs-status'],
+    queryFn: () => systemConfigAPI.getSshfsStatus(),
+    enabled: showActivationModal && isLinuxTemplate && linuxTarget === 'remote',
+  })
+  const sshfsAvailable = sshfsStatusData?.data?.data?.available !== false
+
   const selectedRepo = useMemo(() => {
     if (!selectedRepoId) return null
     return existingRepositories.find((repo: any) => repo.id === selectedRepoId) || null
@@ -130,6 +168,73 @@ export default function Templates() {
     setRepoTestResult({ status: 'idle' })
   }
 
+  const resetSshTest = () => {
+    setSshTestResult({ status: 'idle' })
+  }
+
+  // Test the remote SSH/SFTP connection by listing the remote root — the same
+  // code path the backup uses to reach the server, so success here means the
+  // credentials and connectivity are good.
+  const testSshConnection = async () => {
+    const host = sshHost.trim()
+    const username = sshUsername.trim()
+    if (!host || !username) {
+      toast.error('Enter the SSH host and username first.')
+      return
+    }
+    if (sshAuthMethod === 'key' && !sshKeyId) {
+      toast.error('Select an SSH key first.')
+      return
+    }
+    if (sshAuthMethod === 'password' && !sshPassword) {
+      toast.error('Enter the SSH password first.')
+      return
+    }
+
+    const baseConn = {
+      host,
+      port: Number.isInteger(sshPort) ? sshPort : 22,
+      username,
+      ssh_key_id: sshAuthMethod === 'key' ? (sshKeyId as any) : undefined,
+      ssh_auth_method: sshAuthMethod,
+      ssh_password: sshAuthMethod === 'password' ? sshPassword : undefined,
+      remote_path: '/',
+    }
+    const extractErr = (err: any) =>
+      err?.response?.data?.detail || err?.response?.data?.error || err?.message || 'Connection failed'
+
+    setSshTestResult({ status: 'testing', message: 'Connecting...' })
+    try {
+      // Remote backups mount files via sshfs (SFTP), so SFTP is the
+      // authoritative test for whether the backup will work.
+      const res: any = await repositoriesAPI.sshBrowse({ ...baseConn, use_sftp: true })
+      if (res.data?.success) {
+        setSshTestResult({ status: 'success', message: 'Connection successful (SFTP)' })
+        return
+      }
+      throw new Error(res.data?.error || res.data?.detail || 'Connection failed')
+    } catch (sftpErr: any) {
+      const sftpDetail = extractErr(sftpErr)
+      // Disambiguate: a plain SSH login (shell) can work while the SFTP
+      // subsystem is disabled. Probe shell access so the message is precise.
+      let shellOk = false
+      try {
+        const shellRes: any = await repositoriesAPI.sshBrowse({ ...baseConn, use_sftp: false })
+        shellOk = !!shellRes.data?.success
+      } catch {
+        shellOk = false
+      }
+      if (shellOk) {
+        setSshTestResult({
+          status: 'error',
+          message: `SSH login works, but SFTP failed: ${sftpDetail} Remote backups mount files over SFTP (sshfs), so the server must allow SFTP access (enable the SFTP subsystem in sshd).`,
+        })
+      } else {
+        setSshTestResult({ status: 'error', message: sftpDetail })
+      }
+    }
+  }
+
   const closeActivationModal = () => {
     setShowActivationModal(false)
     setPassphrase('')
@@ -140,11 +245,24 @@ export default function Templates() {
     linuxDefaultsAppliedRef.current = false
     // Reset backup source path to suggested value
     setBackupSourcePath(suggestedBackupSource)
+    // Reset remote (SSH) target state
+    setLinuxTarget('local')
+    setSshHost('')
+    setSshPort(22)
+    setSshUsername('')
+    setSshAuthMethod('key')
+    setSshKeyId('')
+    setSshPassword('')
+    setShowSshPassword(false)
+    resetSshTest()
   }
 
   const openActivationModalFor = (templateId: 'infinity-tools' | 'linux-server') => {
     setActiveTemplate(templateId)
+    setRepoOption('select')
+    setLinuxTarget('local')
     resetRepoTest()
+    resetSshTest()
     if (templateId === 'linux-server') {
       // Apply category defaults now if the template is already loaded; otherwise
       // the effect below initializes them once the status query resolves.
@@ -181,6 +299,14 @@ export default function Templates() {
       linuxDefaultsAppliedRef.current = true
     }
   }, [showActivationModal, activeTemplate, linuxCategories.length])
+
+  // Drop local-only categories when switching to a remote (SSH/SFTP) target.
+  useEffect(() => {
+    resetSshTest()
+    if (linuxTarget === 'remote') {
+      setSelectedCategories((prev) => prev.filter((id) => id !== 'databases' && id !== 'dr_extras'))
+    }
+  }, [linuxTarget])
 
   const toggleCategory = (id: string) => {
     setSelectedCategories((prev) =>
@@ -390,7 +516,7 @@ export default function Templates() {
 
   // Linux Server activation mutation
   const activateLinuxServerMutation = useMutation({
-    mutationFn: (options: { categories: string[], repoOption: 'create' | 'select', repoPath?: string, repoId?: string, logPath?: string, borgVersion?: string, passphrase?: string }) =>
+    mutationFn: (options: { categories: string[], repoOption: 'create' | 'select', repoPath?: string, repoId?: string, logPath?: string, borgVersion?: string, passphrase?: string, sourceType?: 'local' | 'remote', ssh?: any }) =>
       templatesAPI.activateLinuxServer({
         categories: options.categories,
         passphrase: options.passphrase || 'AUTO_GENERATE',
@@ -399,6 +525,8 @@ export default function Templates() {
         repository_id: options.repoId,
         log_file_path: options.logPath,
         borg_version: options.borgVersion,
+        source_type: options.sourceType || 'local',
+        ssh: options.sourceType === 'remote' ? options.ssh : undefined,
       }),
     onSuccess: (response) => {
       const warnings = response.data?.warnings || []
@@ -466,7 +594,7 @@ export default function Templates() {
 
   const handleActivate = () => {
     if (!isRepoTestValid) {
-      toast.error('Please click "Test Connection" before activating the template.')
+      toast.error('Please click "Test Connection" for the repository before activating.')
       return
     }
     
@@ -492,6 +620,33 @@ export default function Templates() {
         toast.error('Select at least one backup category before activating.')
         return
       }
+
+      // Validate the remote (SSH/SFTP) target before activating.
+      let sshPayload: any = undefined
+      if (linuxTarget === 'remote') {
+        if (!sshHost.trim() || !sshUsername.trim()) {
+          toast.error('Enter the remote SSH host and username.')
+          return
+        }
+        if (sshAuthMethod === 'key' && !sshKeyId) {
+          toast.error('Select an SSH key for key authentication.')
+          return
+        }
+        if (sshAuthMethod === 'password' && !sshPassword) {
+          toast.error('Enter the SSH password for password authentication.')
+          return
+        }
+        sshPayload = {
+          host: sshHost.trim(),
+          port: sshPort,
+          username: sshUsername.trim(),
+          auth_method: sshAuthMethod,
+          ssh_key_id: sshAuthMethod === 'key' ? sshKeyId : undefined,
+          ssh_password: sshAuthMethod === 'password' ? sshPassword : undefined,
+          use_sftp: true,
+        }
+      }
+
       activateLinuxServerMutation.mutate({
         categories: selectedCategories,
         repoOption,
@@ -502,6 +657,8 @@ export default function Templates() {
         logPath: normalizedLogPath,
         borgVersion: repoOption === 'create' ? borgVersion : undefined,
         passphrase: repoOption === 'create' ? passphrase : undefined,
+        sourceType: linuxTarget,
+        ssh: sshPayload,
       })
       return
     }
@@ -1303,36 +1460,219 @@ export default function Templates() {
             {/* Body - scrollable */}
             <div className="px-6 py-4 space-y-4 overflow-y-auto flex-1">
               {isLinuxTemplate ? (
-                /* Backup Categories (Linux Server) */
-                <div className="space-y-2">
-                  <label className="block text-sm font-medium text-gray-700">What to back up</label>
-                  <p className="text-xs text-gray-500">
-                    Ticked categories become the sources of editable backup jobs. You can refine each job afterwards in the Backups page.
-                  </p>
-                  <div className="border border-gray-200 rounded-lg divide-y divide-gray-100">
-                    {linuxCategories.length === 0 ? (
-                      <p className="p-3 text-sm text-amber-600">Loading categories...</p>
-                    ) : (
-                      linuxCategories.map((cat) => (
-                        <label key={cat.id} className="flex items-start gap-3 p-3 cursor-pointer hover:bg-gray-50">
-                          <input
-                            type="checkbox"
-                            checked={selectedCategories.includes(cat.id)}
-                            onChange={() => toggleCategory(cat.id)}
-                            className="mt-1 h-4 w-4 text-emerald-600 rounded"
-                          />
-                          <span>
-                            <span className="font-medium text-sm text-gray-900">{cat.label}</span>
-                            <span className="block text-xs text-gray-500">{cat.description}</span>
-                          </span>
-                        </label>
-                      ))
+                <>
+                  {/* Backup target: local server vs. remote over SSH/SFTP */}
+                  <div className="space-y-2">
+                    <label className="block text-sm font-medium text-gray-700">Backup target</label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setLinuxTarget('local')}
+                        className={`flex items-center gap-2 p-3 border rounded-lg text-left transition-colors ${linuxTarget === 'local' ? 'border-emerald-500 bg-emerald-50' : 'border-gray-200 hover:border-gray-300'}`}
+                      >
+                        <Monitor className={`w-5 h-5 ${linuxTarget === 'local' ? 'text-emerald-600' : 'text-gray-400'}`} />
+                        <span>
+                          <span className="block text-sm font-medium text-gray-900">This server</span>
+                          <span className="block text-xs text-gray-500">Where borgmatic runs</span>
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setLinuxTarget('remote')}
+                        className={`flex items-center gap-2 p-3 border rounded-lg text-left transition-colors ${linuxTarget === 'remote' ? 'border-emerald-500 bg-emerald-50' : 'border-gray-200 hover:border-gray-300'}`}
+                      >
+                        <Server className={`w-5 h-5 ${linuxTarget === 'remote' ? 'text-emerald-600' : 'text-gray-400'}`} />
+                        <span>
+                          <span className="block text-sm font-medium text-gray-900">Remote server</span>
+                          <span className="block text-xs text-gray-500">Over SSH / SFTP</span>
+                        </span>
+                      </button>
+                    </div>
+
+                    {linuxTarget === 'remote' && (
+                      <div className="mt-2 space-y-3 p-3 border border-teal-200 bg-teal-50 rounded-lg">
+                        {!sshfsAvailable && (
+                          <div className="flex items-start gap-2 p-2 bg-amber-50 border border-amber-300 rounded text-xs text-amber-900">
+                            <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                            <span>
+                              SSH/SFTP sources are mounted with <span className="font-mono">sshfs</span>, which needs FUSE enabled on the
+                              borgmatic-ui container. It looks unavailable here, so the backup may fail until FUSE/sshfs is enabled.
+                            </span>
+                          </div>
+                        )}
+
+                        {/* Host / Port / Username */}
+                        <div className="grid grid-cols-12 gap-2">
+                          <div className="col-span-7">
+                            <label className="block text-xs font-medium text-gray-600 mb-0.5">Host *</label>
+                            <input
+                              type="text"
+                              value={sshHost}
+                              onChange={(e) => { setSshHost(e.target.value); resetSshTest() }}
+                              className="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-teal-500 focus:border-teal-500"
+                              placeholder="server.example.com"
+                            />
+                          </div>
+                          <div className="col-span-2">
+                            <label className="block text-xs font-medium text-gray-600 mb-0.5">Port</label>
+                            <input
+                              type="number"
+                              value={sshPort}
+                              onChange={(e) => {
+                                const v = parseInt(e.target.value, 10)
+                                setSshPort(Number.isNaN(v) ? 22 : v)
+                                resetSshTest()
+                              }}
+                              className="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-teal-500 focus:border-teal-500"
+                              placeholder="22"
+                              min={1}
+                              max={65535}
+                            />
+                          </div>
+                          <div className="col-span-3">
+                            <label className="block text-xs font-medium text-gray-600 mb-0.5">Username *</label>
+                            <input
+                              type="text"
+                              value={sshUsername}
+                              onChange={(e) => { setSshUsername(e.target.value); resetSshTest() }}
+                              className="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-teal-500 focus:border-teal-500"
+                              placeholder="root"
+                            />
+                          </div>
+                        </div>
+
+                        {/* Auth method */}
+                        <div>
+                          <label className="block text-xs font-medium text-gray-600 mb-0.5">Authentication</label>
+                          <div className="flex bg-gray-100 rounded p-0.5 max-w-[260px]">
+                            <button
+                              type="button"
+                              onClick={() => { setSshAuthMethod('key'); resetSshTest() }}
+                              className={`flex-1 flex items-center justify-center gap-1 px-2 py-1 text-xs rounded transition-colors ${sshAuthMethod === 'key' ? 'bg-white text-teal-700 shadow-sm font-medium' : 'text-gray-600 hover:text-gray-800'}`}
+                            >
+                              <KeyRound className="w-3 h-3" /> SSH Key
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => { setSshAuthMethod('password'); resetSshTest() }}
+                              className={`flex-1 flex items-center justify-center gap-1 px-2 py-1 text-xs rounded transition-colors ${sshAuthMethod === 'password' ? 'bg-white text-teal-700 shadow-sm font-medium' : 'text-gray-600 hover:text-gray-800'}`}
+                            >
+                              <Lock className="w-3 h-3" /> Password
+                            </button>
+                          </div>
+                        </div>
+
+                        {sshAuthMethod === 'key' ? (
+                          <div>
+                            <label className="block text-xs font-medium text-gray-600 mb-0.5">SSH Key *</label>
+                            <select
+                              value={sshKeyId}
+                              onChange={(e) => { setSshKeyId(e.target.value); resetSshTest() }}
+                              className="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-teal-500 focus:border-teal-500 bg-white"
+                            >
+                              <option value="">Select an SSH key…</option>
+                              {selectableSshKeys.map((k) => (
+                                <option key={k.id} value={String(k.id)}>
+                                  {k.name} ({k.key_type})
+                                </option>
+                              ))}
+                            </select>
+                            {selectableSshKeys.length === 0 && (
+                              <p className="mt-1 text-xs text-gray-500">
+                                No usable SSH keys yet. Add an unencrypted key under <span className="font-medium">SSH Keys</span> in the sidebar, or use password auth.
+                              </p>
+                            )}
+                          </div>
+                        ) : (
+                          <div>
+                            <label className="block text-xs font-medium text-gray-600 mb-0.5">SSH Password *</label>
+                            <div className="relative">
+                              <input
+                                type={showSshPassword ? 'text' : 'password'}
+                                value={sshPassword}
+                                onChange={(e) => { setSshPassword(e.target.value); resetSshTest() }}
+                                className="w-full px-2 py-1 pr-8 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-teal-500 focus:border-teal-500"
+                                placeholder="Enter SSH password"
+                                autoComplete="new-password"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => setShowSshPassword((v) => !v)}
+                                className="absolute right-1.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                                title={showSshPassword ? 'Hide password' : 'Show password'}
+                              >
+                                {showSshPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                              </button>
+                            </div>
+                            <p className="mt-1 text-xs text-gray-500">Stored encrypted in the password vault.</p>
+                          </div>
+                        )}
+
+                        {/* Test connection */}
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={testSshConnection}
+                            disabled={sshTestResult.status === 'testing'}
+                            className="flex items-center gap-1 px-3 py-1.5 border border-gray-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50"
+                          >
+                            <Server className="w-3.5 h-3.5" />
+                            {sshTestResult.status === 'testing' ? 'Testing...' : 'Test Connection'}
+                          </button>
+                          {sshTestResult.status === 'success' && (
+                            <span className="flex items-center gap-1 text-xs text-green-700">
+                              <CheckCircle className="w-3.5 h-3.5" /> {sshTestResult.message || 'Connection successful'}
+                            </span>
+                          )}
+                        </div>
+                        {sshTestResult.status === 'error' && (
+                          <div className="flex items-start gap-2 p-2 bg-red-50 border border-red-200 rounded text-xs text-red-800">
+                            <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                            <span className="break-words">{sshTestResult.message || 'Connection failed'}</span>
+                          </div>
+                        )}
+
+                        <p className="text-xs text-teal-800">
+                          The remote folders are temporarily sshfs-mounted while the backup runs. Databases and disaster-recovery
+                          capture are skipped for remote targets (they only work on the local server).
+                        </p>
+                      </div>
                     )}
                   </div>
-                  <p className="text-xs text-gray-500">
-                    In Docker, host paths are read from the <code className="bg-gray-100 px-1 rounded">/host</code> mount. Disaster-recovery and firewall capture is best-effort and depends on host tooling/permissions.
-                  </p>
-                </div>
+
+                  {/* Backup Categories (Linux Server) */}
+                  <div className="space-y-2">
+                    <label className="block text-sm font-medium text-gray-700">What to back up</label>
+                    <p className="text-xs text-gray-500">
+                      Ticked categories become the sources of editable backup jobs. You can refine each job afterwards in the Backups page.
+                    </p>
+                    <div className="border border-gray-200 rounded-lg divide-y divide-gray-100">
+                      {visibleLinuxCategories.length === 0 ? (
+                        <p className="p-3 text-sm text-amber-600">Loading categories...</p>
+                      ) : (
+                        visibleLinuxCategories.map((cat) => (
+                          <label key={cat.id} className="flex items-start gap-3 p-3 cursor-pointer hover:bg-gray-50">
+                            <input
+                              type="checkbox"
+                              checked={selectedCategories.includes(cat.id)}
+                              onChange={() => toggleCategory(cat.id)}
+                              className="mt-1 h-4 w-4 text-emerald-600 rounded"
+                            />
+                            <span>
+                              <span className="font-medium text-sm text-gray-900">{cat.label}</span>
+                              <span className="block text-xs text-gray-500">{cat.description}</span>
+                            </span>
+                          </label>
+                        ))
+                      )}
+                    </div>
+                    <p className="text-xs text-gray-500">
+                      {linuxTarget === 'remote'
+                        ? 'Paths are read from the remote server over SFTP. Make sure your SSH user can read them.'
+                        : 'In Docker, host paths are read from the /host mount. Disaster-recovery and firewall capture is best-effort and depends on host tooling/permissions.'}
+                    </p>
+                  </div>
+                </>
               ) : (
                 /* Backup Source Path (Data Path) - Infinity Tools */
                 <div className="space-y-2">
@@ -1361,6 +1701,70 @@ export default function Templates() {
               {/* Repository Option Selection */}
               <div className="space-y-3">
                 <label className="block text-sm font-medium text-gray-700">Repository Option</label>
+
+                {/* Use Existing Repository */}
+                <label className={`flex items-start p-4 border rounded-lg cursor-pointer transition-colors ${repoOption === 'select' ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'}`}>
+                  <input
+                    type="radio"
+                    name="repoOption"
+                    value="select"
+                    checked={repoOption === 'select'}
+                    onChange={() => {
+                      setRepoOption('select')
+                      resetRepoTest()
+                    }}
+                    className="mt-1 h-4 w-4 text-blue-600"
+                  />
+                  <div className="ml-3 flex-1">
+                    <div className="flex items-center gap-2">
+                      <HardDrive className="w-4 h-4 text-green-600" />
+                      <span className="font-medium text-gray-900">Use Existing Repository</span>
+                    </div>
+                    <p className="text-sm text-gray-500 mt-1">
+                      Select an already configured repository
+                    </p>
+                    {repoOption === 'select' && (
+                      <div className="mt-3">
+                        {existingRepositories.length > 0 ? (
+                          <select
+                            value={selectedRepoId}
+                            onChange={(e) => {
+                              setSelectedRepoId(e.target.value)
+                              resetRepoTest()
+                            }}
+                            className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+                          >
+                            <option value="">Select a repository...</option>
+                            {existingRepositories.map((repo: any) => (
+                              <option key={repo.id} value={repo.id}>
+                                {repo.name || getSafeDisplayPath(repo.path)} ({repo.type || 'local'})
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          <p className="text-sm text-amber-600 bg-amber-50 px-3 py-2 rounded">
+                            No existing repositories found. Create one in the Repositories page first, or use "Create New Repository" option.
+                          </p>
+                        )}
+                        <div className="mt-3 flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={testTemplateRepoConnection}
+                            disabled={repoTestResult.status === 'testing' || !selectedRepoId}
+                            className="flex items-center px-3 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                          >
+                            {repoTestResult.status === 'testing' ? 'Testing...' : 'Test Connection'}
+                          </button>
+                          {repoTestResult.status !== 'idle' && (
+                            <span className={`text-xs ${repoTestResult.status === 'success' ? 'text-green-600' : 'text-red-600'}`}>
+                              {repoTestResult.message || (repoTestResult.status === 'success' ? 'Connection OK' : 'Test failed')}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </label>
 
                 {/* Create New Repository */}
                 <label className={`flex items-start p-4 border rounded-lg cursor-pointer transition-colors ${repoOption === 'create' ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'}`}>
@@ -1512,69 +1916,6 @@ export default function Templates() {
                   </div>
                 </label>
 
-                {/* Use Existing Repository */}
-                <label className={`flex items-start p-4 border rounded-lg cursor-pointer transition-colors ${repoOption === 'select' ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'}`}>
-                  <input
-                    type="radio"
-                    name="repoOption"
-                    value="select"
-                    checked={repoOption === 'select'}
-                    onChange={() => {
-                      setRepoOption('select')
-                      resetRepoTest()
-                    }}
-                    className="mt-1 h-4 w-4 text-blue-600"
-                  />
-                  <div className="ml-3 flex-1">
-                    <div className="flex items-center gap-2">
-                      <HardDrive className="w-4 h-4 text-green-600" />
-                      <span className="font-medium text-gray-900">Use Existing Repository</span>
-                    </div>
-                    <p className="text-sm text-gray-500 mt-1">
-                      Select an already configured repository
-                    </p>
-                    {repoOption === 'select' && (
-                      <div className="mt-3">
-                        {existingRepositories.length > 0 ? (
-                          <select
-                            value={selectedRepoId}
-                            onChange={(e) => {
-                              setSelectedRepoId(e.target.value)
-                              resetRepoTest()
-                            }}
-                            className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
-                          >
-                            <option value="">Select a repository...</option>
-                            {existingRepositories.map((repo: any) => (
-                              <option key={repo.id} value={repo.id}>
-                                {repo.name || getSafeDisplayPath(repo.path)} ({repo.type || 'local'})
-                              </option>
-                            ))}
-                          </select>
-                        ) : (
-                          <p className="text-sm text-amber-600 bg-amber-50 px-3 py-2 rounded">
-                            No existing repositories found. Create one in the Repositories page first, or use "Create New Repository" option.
-                          </p>
-                        )}
-                        <div className="mt-3 flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={testTemplateRepoConnection}
-                            disabled={repoTestResult.status === 'testing' || !selectedRepoId}
-                            className="flex items-center px-3 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-                          >
-                            {repoTestResult.status === 'testing' ? 'Testing...' : 'Test Connection'}
-                          </button>
-                          {repoTestResult.status !== 'idle' && (
-                            <span className={`text-xs ${repoTestResult.status === 'success' ? 'text-green-600' : 'text-red-600'}`}>
-                              {repoTestResult.message || (repoTestResult.status === 'success' ? 'Connection OK' : 'Test failed')}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </label>
               </div>
 
               {/* Log File Path */}
@@ -1613,9 +1954,12 @@ export default function Templates() {
                 <ul className="list-disc list-inside mt-1 space-y-1">
                   {isLinuxTemplate ? (
                     <>
-                      <li>Creates an editable files backup job from your selected categories</li>
+                      <li>
+                        Creates an editable files backup job from your selected categories
+                        {linuxTarget === 'remote' && <> on <span className="font-medium">{sshUsername || 'user'}@{sshHost || 'remote host'}</span> (via sshfs/SFTP)</>}
+                      </li>
                       {selectedCategories.includes('databases') && <li>Auto-discovers databases and creates a separate database backup job</li>}
-                      <li>Sets up daily backup schedules (files at 2 AM, databases at 3 AM)</li>
+                      <li>{selectedCategories.includes('databases') ? 'Sets up daily backup schedules (files at 2 AM, databases at 3 AM)' : 'Sets up a daily files backup schedule (2 AM)'}</li>
                       <li>{repoOption === 'create' ? 'Uses your passphrase for repository encryption' : 'Uses the existing repository encryption'}</li>
                     </>
                   ) : (

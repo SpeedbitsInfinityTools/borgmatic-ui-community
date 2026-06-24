@@ -21,7 +21,7 @@ import {
 import PathSelectorField from '../PathSelectorField';
 import { gitReposAPI } from '../../services/api';
 import { toast } from 'react-hot-toast';
-import SSHSourceCard from './SSHSourceCard';
+import SSHServerGroupCard from './SSHServerGroupCard';
 
 const DB_TYPES = ['postgresql', 'mysql', 'mariadb', 'mongodb', 'sqlite', 'mssql'];
 
@@ -143,6 +143,35 @@ const WizardStepSources: React.FC<WizardStepSourcesProps> = (props) => {
   const dbCount = dbSources.length;
   const gitCount = gitSources.length;
   const sshCount = sshSources.length;
+
+  // Cosmetically group SSH/SFTP sources that share the same connection:
+  // same server (host + port) + same user + same auth method (key vs password),
+  // and for key auth the same SSH key (different keys form different groups).
+  // Each path is still its own independent source under the hood — the grouped
+  // card just renders the shared connection once and lists the per-path sources
+  // for individual edit/remove.
+  const sshGroupKey = (s: any) => [
+    String(s.host || '').trim(),
+    Number.isInteger(s.port) ? s.port : 22,
+    String(s.username || '').trim(),
+    s.auth_method === 'password' ? 'password' : 'key',
+    s.auth_method === 'password' ? '' : String(s.ssh_key_id ?? ''),
+  ].join('\u0000');
+  const sshGroups: { key: string; minIndex: number; members: { source: any; index: number }[] }[] = [];
+  {
+    const byKey = new Map<string, { key: string; minIndex: number; members: { source: any; index: number }[] }>();
+    sshSources.forEach(({ source, index }: any) => {
+      const k = sshGroupKey(source);
+      let g = byKey.get(k);
+      if (!g) {
+        g = { key: k, minIndex: index, members: [] };
+        byKey.set(k, g);
+        sshGroups.push(g);
+      }
+      g.members.push({ source, index });
+      if (index < g.minIndex) g.minIndex = index;
+    });
+  }
 
   const sentinelRef = useRef<HTMLDivElement>(null);
   const [isStuck, setIsStuck] = useState(false);
@@ -291,21 +320,22 @@ const WizardStepSources: React.FC<WizardStepSourcesProps> = (props) => {
               <span className="text-sm font-medium text-teal-800">SSH / SFTP Sources</span>
               <span className="text-xs text-teal-600 bg-teal-50 px-1.5 py-0.5 rounded">{sshCount}</span>
             </div>
-            {sshSources.map(({ source, index }: any, pos: number) => (
-              <React.Fragment key={index}>
+            {sshGroups.map((group, pos: number) => (
+              <React.Fragment key={group.minIndex}>
                 {pos > 0 && (
                   <div className="flex items-center gap-2 py-1">
                     <div className="flex-1 border-t border-teal-200" />
-                    <span className="text-[10px] text-teal-400 font-medium">SSH {pos + 1} of {sshCount}</span>
+                    <span className="text-[10px] text-teal-400 font-medium">Server {pos + 1} of {sshGroups.length}</span>
                     <div className="flex-1 border-t border-teal-200" />
                   </div>
                 )}
-                <SSHSourceCard
-                  source={source}
-                  index={index}
+                <SSHServerGroupCard
+                  members={group.members}
                   updateSource={updateSource}
                   trimSourceField={trimSourceField}
                   removeSource={removeSource}
+                  formData={formData}
+                  setFormData={setFormData}
                 />
               </React.Fragment>
             ))}

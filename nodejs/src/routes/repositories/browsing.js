@@ -715,10 +715,11 @@ async function browseSftp(host, port, username, authMethod, sshKey, ssh_password
 
         console.log('📂 [ssh-browse] Trying SFTP mode for:', host, 'path:', targetPath);
 
+        const SFTP_TIMEOUT_MS = 20000;
         const result = await execa(sftpArgs[0], sftpArgs.slice(1), {
             input: sftpCommands,
             env,
-            timeout: 20000,
+            timeout: SFTP_TIMEOUT_MS,
             reject: false
         });
 
@@ -733,7 +734,27 @@ async function browseSftp(host, port, username, authMethod, sshKey, ssh_password
         console.log('📂 [ssh-browse] SFTP exit code:', result.exitCode);
 
         if (result.exitCode !== 0) {
-            const errorMsg = result.stderr || result.stdout || 'SFTP connection failed';
+            // Prefer the real subprocess output; fall back to an actionable
+            // message when sftp/sshpass exits without writing anything (so the
+            // UI no longer shows a bare "SFTP connection failed").
+            let errorMsg = (result.stderr || result.stdout || '').trim();
+            if (!errorMsg) {
+                // execa runs with reject:false here, so a failure to even spawn
+                // the binary (e.g. sshpass missing on a bare-metal/dev host) comes
+                // back as a result with no exit code rather than a thrown ENOENT.
+                // Detect that and name the missing command explicitly.
+                const spawnMsg = String(result.shortMessage || result.originalMessage || result.message || '');
+                const isSpawnFailure = result.code === 'ENOENT' || /\bENOENT\b/i.test(spawnMsg) || /command not found/i.test(spawnMsg);
+                if (isSpawnFailure) {
+                    const missing = (/sshpass/i.test(spawnMsg) || sftpArgs[0] === 'sshpass') ? 'sshpass' : sftpArgs[0];
+                    errorMsg = `Required command "${missing}" is not installed on the host running borgmatic-ui. Install it (Debian/Ubuntu: "sudo apt-get install -y ${missing}") and try again — password-based SSH/SFTP needs sshpass.`;
+                } else if (result.timedOut) {
+                    errorMsg = `SFTP connection timed out after ${SFTP_TIMEOUT_MS / 1000}s — the server did not respond. It may not offer an SFTP subsystem, or a firewall is dropping the connection.`;
+                } else {
+                    const code = (result.exitCode === undefined || result.exitCode === null) ? 'unknown' : result.exitCode;
+                    errorMsg = `SFTP connection failed (exit code ${code}) with no error output. The server may not provide an SFTP subsystem (only an interactive shell is allowed), or the password could not be supplied automatically (e.g. the server uses a non-standard prompt or keyboard-interactive auth).`;
+                }
+            }
             throw new Error(errorMsg);
         }
 

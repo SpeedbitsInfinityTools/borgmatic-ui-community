@@ -339,7 +339,7 @@ router.get('/linux-server/status', authenticateToken, async (req, res) => {
 router.post('/linux-server/activate', authenticateToken, requireAdmin, async (req, res) => {
     console.log('📥 /linux-server/activate endpoint hit');
     try {
-        const { passphrase, repository_option, repository_path, repository_id, log_file_path, borg_version, categories } = req.body;
+        const { passphrase, repository_option, repository_path, repository_id, log_file_path, borg_version, categories, source_type, ssh } = req.body;
         const fs = require('fs-extra');
         const path = require('path');
 
@@ -350,6 +350,50 @@ router.post('/linux-server/activate', authenticateToken, requireAdmin, async (re
                 detail: 'categories must be an array of category ids.',
                 error_code: 'INVALID_CATEGORIES'
             });
+        }
+
+        // Validate remote (SSH/SFTP) target when requested
+        if (source_type === 'remote') {
+            const conn = ssh || {};
+            if (conn.auth_method !== undefined && conn.auth_method !== 'key' && conn.auth_method !== 'password') {
+                return res.status(400).json({
+                    success: false,
+                    detail: 'SSH auth_method must be "key" or "password".',
+                    error_code: 'INVALID_SSH'
+                });
+            }
+            const authMethod = conn.auth_method === 'password' ? 'password' : 'key';
+            if (!conn.host || !String(conn.host).trim() || !conn.username || !String(conn.username).trim()) {
+                return res.status(400).json({
+                    success: false,
+                    detail: 'Remote backup requires an SSH host and username.',
+                    error_code: 'INVALID_SSH'
+                });
+            }
+            if (conn.port !== undefined && conn.port !== null && conn.port !== '') {
+                const portNum = Number(conn.port);
+                if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
+                    return res.status(400).json({
+                        success: false,
+                        detail: 'SSH port must be an integer between 1 and 65535.',
+                        error_code: 'INVALID_SSH'
+                    });
+                }
+            }
+            if (authMethod === 'key' && !conn.ssh_key_id) {
+                return res.status(400).json({
+                    success: false,
+                    detail: 'Select an SSH key for key authentication.',
+                    error_code: 'INVALID_SSH'
+                });
+            }
+            if (authMethod === 'password' && !conn.ssh_password) {
+                return res.status(400).json({
+                    success: false,
+                    detail: 'Enter an SSH password for password authentication.',
+                    error_code: 'INVALID_SSH'
+                });
+            }
         }
 
         // Allowlist category ids against the template definition to avoid acting
@@ -446,6 +490,7 @@ router.post('/linux-server/activate', authenticateToken, requireAdmin, async (re
             log_file_path,
             borg_version,
             categories,
+            source_type: source_type || 'local',
             hasPassphrase: !!passphrase
         });
 
@@ -456,7 +501,9 @@ router.post('/linux-server/activate', authenticateToken, requireAdmin, async (re
             repository_path: repository_path,
             repository_id: repository_id,
             log_file_path: log_file_path,
-            borg_version: borg_version || '1.x'
+            borg_version: borg_version || '1.x',
+            source_type: source_type === 'remote' ? 'remote' : 'local',
+            ssh: source_type === 'remote' ? ssh : undefined
         });
 
         res.status(201).json({

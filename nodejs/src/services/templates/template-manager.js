@@ -948,6 +948,8 @@ class TemplateManager {
      * @param {string} options.repository_id
      * @param {string} options.log_file_path
      * @param {string} options.borg_version - '1.x' | '2.x'
+     * @param {string} [options.source_type] - 'local' (default) | 'remote'
+     * @param {Object} [options.ssh] - remote connection { host, port, username, auth_method, ssh_key_id, ssh_password, use_sftp } (required when source_type==='remote')
      */
     async activateLinuxServerTemplate(options = {}) {
         const services = getServices();
@@ -965,10 +967,38 @@ class TemplateManager {
             throw new Error('Backup Manager not available');
         }
 
+        // Determine the backup target: the local server (default) or a remote
+        // server reached over SSH/SFTP (files are sshfs-mounted at backup time).
+        const isRemote = options.source_type === 'remote';
+        const ssh = options.ssh || {};
+        const sshAuthMethod = ssh.auth_method === 'password' ? 'password' : 'key';
+
+        if (isRemote) {
+            if (!ssh.host || !String(ssh.host).trim()) {
+                throw new Error('Remote backup requires an SSH host');
+            }
+            if (!ssh.username || !String(ssh.username).trim()) {
+                throw new Error('Remote backup requires an SSH username');
+            }
+            if (sshAuthMethod === 'key' && !ssh.ssh_key_id) {
+                throw new Error('Remote backup requires an SSH key for key authentication');
+            }
+            if (sshAuthMethod === 'password' && !ssh.ssh_password) {
+                throw new Error('Remote backup requires an SSH password for password authentication');
+            }
+        }
+
         // Resolve selected categories (fall back to the template defaults)
-        const selectedCategories = Array.isArray(options.categories) && options.categories.length > 0
+        let selectedCategories = Array.isArray(options.categories) && options.categories.length > 0
             ? options.categories
             : template.categories.filter(c => c.default).map(c => c.id);
+
+        // Database auto-discovery (scans the local Docker daemon) and
+        // disaster-recovery capture (chroots into the local /host mount) only work
+        // for the local server, so they are dropped for a remote SSH target.
+        if (isRemote) {
+            selectedCategories = selectedCategories.filter(id => id !== 'databases' && id !== 'dr_extras');
+        }
 
         const result = {
             template_id: 'linux-server',
@@ -983,6 +1013,12 @@ class TemplateManager {
         };
 
         try {
+            // For a remote target the only valid categories are file categories;
+            // give a clear message instead of the generic "no jobs created" guard.
+            if (isRemote && selectedCategories.length === 0) {
+                throw new Error('Select at least one file category for a remote backup. Databases and disaster-recovery capture are only available for the local server.');
+            }
+
             result.steps.push(`ℹ️ Selected categories: ${selectedCategories.join(', ')}`);
             result.steps.push('ℹ️ Canary file protection is disabled by default (enable later in Backup → Advanced).');
 
@@ -1000,17 +1036,23 @@ class TemplateManager {
             const logManager = require('../log-manager');
             const logFilePath = options.log_file_path || logManager.getBorgmaticLogPath();
 
-            // Step 3: Build host-prefixed file sources from selected categories
-            const hostPrefix = getHostPathPrefix();
-            result.steps.push(hostPrefix
-                ? `ℹ️ Host filesystem detected at ${hostPrefix} (paths prefixed accordingly)`
-                : 'ℹ️ Using native paths (no /host prefix)');
+            // Step 3: Build file source paths from selected categories.
+            // Local target: prefix with /host in Docker. Remote target: bare paths
+            // on the remote server (sshfs-mounted at backup time, so no prefix).
+            const hostPrefix = isRemote ? '' : getHostPathPrefix();
+            if (isRemote) {
+                result.steps.push(`ℹ️ Remote target ${ssh.username}@${ssh.host} (files mounted via sshfs/SFTP at backup time)`);
+            } else {
+                result.steps.push(hostPrefix
+                    ? `ℹ️ Host filesystem detected at ${hostPrefix} (paths prefixed accordingly)`
+                    : 'ℹ️ Using native paths (no /host prefix)');
+            }
 
             let sources = this._buildLinuxSources(template, selectedCategories, hostPrefix);
 
-            // Step 3b: Disaster-recovery extras (hooks + package-db source dirs)
+            // Step 3b: Disaster-recovery extras (LOCAL target only)
             let drHooks = [];
-            if (selectedCategories.includes('dr_extras')) {
+            if (!isRemote && selectedCategories.includes('dr_extras')) {
                 const dr = this._buildDrExtras(hostPrefix);
                 drHooks = dr.hooks;
                 sources = this._dedupeNestedPaths([...sources, ...dr.sourcePaths]);
@@ -1024,10 +1066,26 @@ class TemplateManager {
                 result.steps.push(`✅ Files backup sources (${sources.length}): ${sources.join(', ')}`);
                 result.steps.push('Creating files backup job...');
 
+                // Remote target: each path becomes an SSH source (sshfs-mounted).
+                // Local target: each path is a plain local directory.
+                const fileSourceObjects = isRemote
+                    ? sources.map(p => ({
+                        type: 'ssh',
+                        host: String(ssh.host).trim(),
+                        port: Number.isInteger(ssh.port) ? ssh.port : (parseInt(ssh.port, 10) || 22),
+                        username: String(ssh.username).trim(),
+                        auth_method: sshAuthMethod,
+                        ssh_key_id: sshAuthMethod === 'key' ? ssh.ssh_key_id : undefined,
+                        ssh_password: sshAuthMethod === 'password' ? ssh.ssh_password : undefined,
+                        use_sftp: ssh.use_sftp !== false,
+                        remote_path: p,
+                    }))
+                    : sources.map(p => ({ type: 'local', path: p }));
+
                 const filesBackupData = {
                     name: template.filesBackup.name,
                     description: template.filesBackup.description,
-                    sources: sources.map(p => ({ type: 'local', path: p })),
+                    sources: fileSourceObjects,
                     repositories: [{ path: repositoryPath, label: 'Linux Server Repo' }],
                     ...(passphrase ? { repository_passphrase: passphrase } : {}),
                     retention_profile_id: defaultRetention.id,
@@ -1041,6 +1099,8 @@ class TemplateManager {
                         template_id: 'linux-server',
                         type: 'files',
                         categories: selectedCategories,
+                        target: isRemote ? 'remote' : 'local',
+                        ...(isRemote ? { remote_host: `${String(ssh.username).trim()}@${String(ssh.host).trim()}` } : {}),
                         created_at: new Date().toISOString()
                     }
                 };
