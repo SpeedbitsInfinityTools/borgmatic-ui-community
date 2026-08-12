@@ -151,12 +151,23 @@ function _resetSshfsAvailableCache() {
  * IdentityFile flag is added by the mount script for key auth.
  */
 function defaultMountOptions() {
-    return [
+    const options = [
         'reconnect',
         'ServerAliveInterval=15',
         'ServerAliveCountMax=3',
         'StrictHostKeyChecking=accept-new',
     ];
+
+    // Without a writable known_hosts, accept-new degrades to accepting any key
+    // on every connection: /root/.ssh is mounted read-only, so ssh can never
+    // record what it saw and has nothing to compare against next time. Point it
+    // at the app's data directory so the key actually pins. Omitted rather than
+    // guessed if that location is unusable — see ssh-known-hosts.
+    const { knownHostsOption } = require('./ssh-known-hosts');
+    const knownHosts = knownHostsOption();
+    if (knownHosts) options.push(knownHosts);
+
+    return options;
 }
 
 /**
@@ -200,6 +211,102 @@ TIMEOUT_BIN="$(command -v timeout 2>/dev/null || true)"
   || \${TIMEOUT_BIN:+timeout 10} fusermount -uz "$MOUNT_POINT" 2>/dev/null \\
   || \${TIMEOUT_BIN:+timeout 10} umount -l "$MOUNT_POINT" 2>/dev/null \\
   || true`;
+}
+
+/**
+ * Bash snippet that runs the sshfs command and then proves the mount is real.
+ *
+ * sshfs's exit code cannot be trusted in either direction. It forks into the
+ * background once the FUSE device is attached, so a rejected password or a
+ * refused connection happens after the parent has already exited 0 — that is
+ * the failure this whole snippet exists to explain. In the opposite case a
+ * non-zero exit used to kill the hook under "set -e" before a single word
+ * reached the log. So: capture the output, judge on the mount itself, and name
+ * the causes that actually occur in the field instead of leaving the operator
+ * with "mount did not appear" and nothing to act on.
+ *
+ * Expects MOUNT_POINT, HOST, PORT, USER_NAME and REMOTE_PATH to be assigned.
+ *
+ * @param {object} opts
+ * @param {string} opts.command      — the full sshfs invocation
+ * @param {string} [opts.preVerify]  — runs after the mount, before verifying
+ * @param {string} [opts.cleanup]    — runs just before exiting on failure
+ * @returns {string}
+ */
+function buildMountAndVerifySnippet({ command, preVerify = '', cleanup = '' } = {}) {
+    if (!command) {
+        throw new Error('buildMountAndVerifySnippet: command is required');
+    }
+    const preVerifyBlock = preVerify ? `${preVerify}\n` : '';
+    const cleanupBlock = cleanup ? `${cleanup}\n` : '';
+
+    return `SSHFS_LOG="$(mktemp)"
+set +e
+${command} >"$SSHFS_LOG" 2>&1
+SSHFS_RC=$?
+set -e
+${preVerifyBlock}sshfs_is_mounted() {
+  if command -v mountpoint >/dev/null 2>&1; then
+    mountpoint -q "$MOUNT_POINT"
+  else
+    # busybox images without mountpoint(1): mountinfo carries the same truth.
+    grep -qF " $MOUNT_POINT " /proc/self/mountinfo
+  fi
+}
+# Poll briefly: sshfs returns as soon as it has forked, so on a slow link the
+# mount can land a moment after the command comes back.
+MOUNTED=false
+for _ in 1 2 3 4 5; do
+  if sshfs_is_mounted; then MOUNTED=true; break; fi
+  sleep 1
+done
+if [ "$MOUNTED" != true ]; then
+  echo "ERROR: sshfs mount did not appear at $MOUNT_POINT — backup aborted" >&2
+  echo "       sshfs exit code: $SSHFS_RC" >&2
+  if [ -s "$SSHFS_LOG" ]; then
+    echo "       sshfs said:" >&2
+    sed 's/^/         /' "$SSHFS_LOG" >&2
+  else
+    echo "       sshfs printed nothing — it had already forked into the background," >&2
+    echo "       which is why its exit code says nothing about the real failure." >&2
+  fi
+  if [ ! -e /dev/fuse ]; then
+    echo "       LIKELY CAUSE: /dev/fuse does not exist in this container, so no FUSE" >&2
+    echo "       mount can ever succeed. SSH/SFTP sources need all three of these in" >&2
+    echo "       the compose file, then a container recreate:" >&2
+    echo "         devices:      [ /dev/fuse:/dev/fuse ]" >&2
+    echo "         cap_add:      [ SYS_ADMIN ]" >&2
+    echo "         security_opt: [ apparmor:unconfined ]" >&2
+  elif grep -qiE 'permission denied|authentication fail|auth fail|too many authentication' "$SSHFS_LOG" 2>/dev/null; then
+    echo "       LIKELY CAUSE: $HOST rejected the credentials for $USER_NAME." >&2
+  elif grep -qiE 'host key verification failed|remote host identification has changed' "$SSHFS_LOG" 2>/dev/null; then
+    echo "       LIKELY CAUSE: the host key of $HOST no longer matches the one recorded" >&2
+    echo "       on first connection. Either the server was rebuilt/reinstalled, or the" >&2
+    echo "       connection is being intercepted. Verify the new key is expected, then" >&2
+    echo "       clear the old one:  ssh-keygen -R '[$HOST]:$PORT' -f <known_hosts>" >&2
+  elif grep -qiE 'connection refused|connection reset|timed out|no route to host|network is unreachable' "$SSHFS_LOG" 2>/dev/null; then
+    echo "       LIKELY CAUSE: $HOST:$PORT refused or dropped the connection. A remote" >&2
+    echo "       fail2ban ban is the usual reason after a run of failed backups." >&2
+  elif [ ! -s "$SSHFS_LOG" ]; then
+    # The silent case, and the common one: sshfs hands the terminal to its ssh
+    # child, so a rejected password is answered on a pty nobody captured and the
+    # hook sees exit 0 with no output at all. A plain TCP probe costs nothing and
+    # no login attempt, yet separates "server refused us" from "server took the
+    # connection and then turned down the credential".
+    if timeout 8 bash -c "</dev/tcp/$HOST/$PORT" 2>/dev/null; then
+      echo "       LIKELY CAUSE: $HOST:$PORT accepts connections but the mount never" >&2
+      echo "       came up and sshfs reported nothing — the signature of a credential" >&2
+      echo "       rejected after sshfs forked. Check the password or key for" >&2
+      echo "       $USER_NAME with Test Connection on this source." >&2
+    else
+      echo "       LIKELY CAUSE: $HOST:$PORT did not accept a connection at all." >&2
+    fi
+  fi
+  rm -f "$SSHFS_LOG"
+${cleanupBlock}  exit 1
+fi
+rm -f "$SSHFS_LOG"
+echo "sshfs mount ok: $USER_NAME@$HOST:$REMOTE_PATH -> $MOUNT_POINT"`;
 }
 
 /**
@@ -324,15 +431,10 @@ mkdir -p "$MOUNT_POINT"
 # IdentitiesOnly=yes: offer ONLY this key — without it ssh also offers every
 # /root/.ssh key, and each rejected one logs "Failed publickey" on the remote
 # sshd, tripping fail2ban (same trap fixed across the browse/borg paths).
-sshfs -p "$PORT" -o "$OPTS" -o "IdentityFile=$KEYFILE" -o IdentitiesOnly=yes "$USER_NAME@$HOST:$REMOTE_PATH" "$MOUNT_POINT"
-# Hard-verify: sshfs has been known to return 0 even when the mount didn't
-# actually take. mountpoint(1) is the authoritative check.
-if ! mountpoint -q "$MOUNT_POINT"; then
-  echo "ERROR: sshfs mount did not appear at $MOUNT_POINT — backup aborted" >&2
-  rm -f "$KEYFILE"
-  exit 1
-fi
-echo "sshfs mount ok: $USER_NAME@$HOST:$REMOTE_PATH -> $MOUNT_POINT"`;
+${buildMountAndVerifySnippet({
+    command: 'sshfs -p "$PORT" -o "$OPTS" -o "IdentityFile=$KEYFILE" -o IdentitiesOnly=yes "$USER_NAME@$HOST:$REMOTE_PATH" "$MOUNT_POINT"',
+    cleanup: '  rm -f "$KEYFILE"',
+})}`;
     }
 
     if (authMethod === 'password') {
@@ -356,20 +458,30 @@ fi
 # Must precede "mkdir -p" — see the key-auth branch.
 ${buildStaleMountReleaseSnippet()}
 mkdir -p "$MOUNT_POINT"
-# Feed password via sshpass env var (never as CLI argument).
+# Feed the password through sshfs's own password_stdin, NOT through sshpass.
+# sshpass drives its child on a pty, and sshfs daemonises as soon as the SFTP
+# handshake completes: sshpass then sees its direct child exit, tears the pty
+# down and returns 0, and the backgrounded FUSE daemon dies with it. The result
+# is a "successful" command that mounted nothing — exit 0, no output, no mount,
+# no clue. Verified against a live server: sshpass never mounted, password_stdin
+# mounted every time. sshpass stays correct for sftp/borg, which never fork.
+#
 # Pin to password-only auth so ssh doesn't offer /root/.ssh keys before the
 # password and trip the remote fail2ban (same trap fixed across browse/borg).
 # NOTE: sshfs -o values must be comma-free (FUSE splits on commas), hence the
 # sshfs-specific variant of the password-auth flags.
-export SSHPASS="$PASS_RAW"
-sshpass -e sshfs -p "$PORT" -o "$OPTS" ${buildSshfsPasswordArgString()} "$USER_NAME@$HOST:$REMOTE_PATH" "$MOUNT_POINT"
-unset SSHPASS
-unset PASS_RAW
-if ! mountpoint -q "$MOUNT_POINT"; then
-  echo "ERROR: sshfs mount did not appear at $MOUNT_POINT — backup aborted" >&2
-  exit 1
+${buildMountAndVerifySnippet({
+    command: `printf '%s\\n' "$PASS_RAW" | sshfs -o password_stdin -p "$PORT" -o "$OPTS" ${buildSshfsPasswordArgString()} "$USER_NAME@$HOST:$REMOTE_PATH" "$MOUNT_POINT"`,
+    // The captured output is about to be echoed into the backup log, so make
+    // sure the password cannot ride along in it. Drop the whole capture rather
+    // than trying to rewrite it — a partial redaction that misses one encoding
+    // of the secret is worse than no output at all.
+    preVerify: `if [ -n "\${PASS_RAW:-}" ] && grep -qF -- "$PASS_RAW" "$SSHFS_LOG" 2>/dev/null; then
+  : > "$SSHFS_LOG"
+  echo "NOTE: sshfs output withheld — it contained the password." >&2
 fi
-echo "sshfs mount ok: $USER_NAME@$HOST:$REMOTE_PATH -> $MOUNT_POINT"`;
+unset PASS_RAW`,
+})}`;
     }
 
     throw new Error(`buildSshfsMountScript: unsupported authMethod "${authMethod}"`);
