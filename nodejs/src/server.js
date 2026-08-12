@@ -376,6 +376,16 @@ async function startServer() {
         console.warn('⚠️ Backup metadata reconciliation warning:', error.message);
     }
 
+    // Bring sshfs hooks of existing jobs up to date. Hook scripts are frozen
+    // into each job's YAML at save time, so shipping a fix to the generator
+    // does not reach jobs that already exist. No-op once applied.
+    try {
+        const { migrateSshfsHooks } = require('./services/migrations/sshfs-hook-migration');
+        await migrateSshfsHooks();
+    } catch (error) {
+        console.warn('⚠️ sshfs hook migration warning:', error.message);
+    }
+
     // Initialize schedule manager (restores cron jobs for active backups)
     try {
         const scheduleManager = require('./services/schedule-manager');

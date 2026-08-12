@@ -175,6 +175,34 @@ function shellSingleQuote(value) {
 }
 
 /**
+ * Bash snippet that force-releases a stale mount left at "$MOUNT_POINT".
+ *
+ * Expects MOUNT_POINT to already be assigned. Safe to run when nothing is
+ * mounted. Shared by the mount and umount scripts so both handle the same
+ * failure modes identically.
+ *
+ * @returns {string}
+ */
+function buildStaleMountReleaseSnippet() {
+    return `# Force-release any stale mount at this path. A run that died mid-backup
+# (container restart, OOM kill, network drop) leaves a FUSE mount whose daemon
+# is gone; every stat() on it then either fails with EIO or blocks forever, and
+# the mount point name is deterministic, so that state breaks all later runs.
+# Unconditional on purpose: "mountpoint -q" fails the same way, so it cannot
+# guard this. Lazy unmount plus a timeout keeps the wedged case — where the
+# unmount itself blocks — from hanging the pipeline.
+# fusermount3 comes first because the image installs fuse3, which names the
+# helper fusermount3; plain "fusermount" ships with fuse2 and is absent, so
+# relying on it silently fell through to umount -l, which needs CAP_SYS_ADMIN
+# and therefore left mounts behind wherever that capability is not granted.
+TIMEOUT_BIN="$(command -v timeout 2>/dev/null || true)"
+\${TIMEOUT_BIN:+timeout 10} fusermount3 -uz "$MOUNT_POINT" 2>/dev/null \\
+  || \${TIMEOUT_BIN:+timeout 10} fusermount -uz "$MOUNT_POINT" 2>/dev/null \\
+  || \${TIMEOUT_BIN:+timeout 10} umount -l "$MOUNT_POINT" 2>/dev/null \\
+  || true`;
+}
+
+/**
  * Build a unique mount point path for a backup's SSH source.
  *
  * @param {string} backupId
@@ -287,11 +315,10 @@ touch "$KEYFILE"
 chmod 600 "$KEYFILE"
 printf '%s\\n' "$KEY_RAW" > "$KEYFILE"
 unset KEY_RAW
+# Must precede "mkdir -p": on a stale mount mkdir fails and "set -e" aborts the
+# hook before any cleanup could run.
+${buildStaleMountReleaseSnippet()}
 mkdir -p "$MOUNT_POINT"
-# Clean up any stale half-mounted state from a previous failed run.
-if mountpoint -q "$MOUNT_POINT"; then
-  fusermount -uz "$MOUNT_POINT" 2>/dev/null || true
-fi
 # IdentityFile is passed as its own -o so "$KEYFILE" expands to the real temp
 # key path (it cannot live inside the single-quoted $OPTS — see sshfs-helpers).
 # IdentitiesOnly=yes: offer ONLY this key — without it ssh also offers every
@@ -326,10 +353,9 @@ if [ -z "$PASS_RAW" ]; then
   echo "ERROR: SSH password env var ${passVar} is empty — backup credential injection failed" >&2
   exit 1
 fi
+# Must precede "mkdir -p" — see the key-auth branch.
+${buildStaleMountReleaseSnippet()}
 mkdir -p "$MOUNT_POINT"
-if mountpoint -q "$MOUNT_POINT"; then
-  fusermount -uz "$MOUNT_POINT" 2>/dev/null || true
-fi
 # Feed password via sshpass env var (never as CLI argument).
 # Pin to password-only auth so ssh doesn't offer /root/.ssh keys before the
 # password and trip the remote fail2ban (same trap fixed across browse/borg).
@@ -370,10 +396,8 @@ function buildSshfsUmountScript(opts) {
 # Cleanup is best-effort: never block the backup pipeline on umount issues.
 set +e
 MOUNT_POINT=${mountQ}
-if mountpoint -q "$MOUNT_POINT"; then
-  fusermount -uz "$MOUNT_POINT" 2>/dev/null || umount -l "$MOUNT_POINT" 2>/dev/null || true
-fi
-rmdir "$MOUNT_POINT" 2>/dev/null || true
+${buildStaleMountReleaseSnippet()}
+\${TIMEOUT_BIN:+timeout 10} rmdir "$MOUNT_POINT" 2>/dev/null || true
 ${keyFileQ ? `KEYFILE=${keyFileQ}
 rm -f "$KEYFILE" 2>/dev/null || true` : '# no key tmpfile for password auth'}
 exit 0`;
