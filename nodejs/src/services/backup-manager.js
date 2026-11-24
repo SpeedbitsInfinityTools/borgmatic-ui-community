@@ -9,6 +9,7 @@ const retentionManager = require('./retention-manager');
 const configParser = require('./config-parser');
 const dbGen = require('./db-script-generators');
 const hookEx = require('./hook-extractors');
+const { DEFAULT_LOCK_WAIT_SECONDS } = require('../utils/borg-defaults');
 
 const execAsync = promisify(exec);
 
@@ -909,10 +910,10 @@ class BackupManager {
             config.upload_rate_limit = backupData.upload_rate_limit;
         }
 
-        // Lock wait timeout - fail fast if repo is locked instead of waiting forever
-        // This helps prevent backup jobs from hanging and makes lock issues visible
-        // Default: 60 seconds (configurable per backup)
-        config.lock_wait = backupData.lock_wait !== undefined ? backupData.lock_wait : 60;
+        // Lock wait timeout. Borg allows one writer per repository, so jobs that
+        // share a repository queue up on its lock; this must cover the longest
+        // sibling job, yet still fail on a genuinely stale lock.
+        config.lock_wait = backupData.lock_wait !== undefined ? backupData.lock_wait : DEFAULT_LOCK_WAIT_SECONDS;
 
         // Borgmatic 2.x treats borg exit code 105 (permission warning: unreadable
         // files) as a fatal error by default. In borg 1.x this was just a warning.

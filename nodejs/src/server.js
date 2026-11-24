@@ -386,6 +386,13 @@ async function startServer() {
         console.warn('⚠️ sshfs hook migration warning:', error.message);
     }
 
+    try {
+        const { migrateLockWait } = require('./services/migrations/lock-wait-migration');
+        await migrateLockWait();
+    } catch (error) {
+        console.warn('⚠️ lock_wait migration warning:', error.message);
+    }
+
     // Initialize schedule manager (restores cron jobs for active backups)
     try {
         const scheduleManager = require('./services/schedule-manager');

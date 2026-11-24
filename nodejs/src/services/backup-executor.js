@@ -69,6 +69,21 @@ class BackupExecutor {
     }
 
     /**
+     * Names of other running backups that write to the given repository path.
+     */
+    getSiblingBackupsUsingRepo(backupId, repoPath) {
+        const names = [];
+        for (const [otherId, info] of this.runningBackups.entries()) {
+            if (otherId === backupId || !info.backup) continue;
+            const repos = info.backup.repositories_summary || info.backup.config?.location?.repositories || [];
+            if (repos.some((r) => (r?.path || r) === repoPath)) {
+                names.push(info.backup.name);
+            }
+        }
+        return names;
+    }
+
+    /**
      * Get all currently running backups
      */
     getRunningBackups() {
@@ -310,6 +325,14 @@ class BackupExecutor {
                 const repoPathForCheck = repoConfig.path || repoConfig;
                 const repo = allRepos.find(r => r.path === repoPathForCheck);
                 const repoLabel = repo?.label || repo?.name || repoPathForCheck;
+
+                // A sibling job's lock is live, not stale: borgmatic waits for it
+                // via lock_wait, and breaking it could corrupt the repository.
+                const siblings = this.getSiblingBackupsUsingRepo(backupId, repoPathForCheck);
+                if (siblings.length > 0) {
+                    console.log(`⏳ Repository "${repoLabel}" is in use by: ${siblings.join(', ')} — borgmatic will wait for its lock`);
+                    continue;
+                }
 
                 try {
                     const borgVersion = repo?.borg_version || '1.x';
