@@ -25,6 +25,7 @@ nodejs/src/routes/director.js
 /config/
 /data/
 /logs/
+nodejs/src/config/admin.yaml
 
 # Deployment and setup scripts (not needed for build)
 /deploy/
